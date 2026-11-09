@@ -1,0 +1,17 @@
+# Core runtime dependencies. Pinned to avoid surprise breakage.
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<4
+
+# Data
+SQLAlchemy>=2.0,<3
+asyncpg>=0.29,<1
+psycopg[binary]>=3.2,<4
+
+# Migrations
+alembic>=1.13,<2
+
+# Terminal / codex
+ptyprocess>=0.7,<1
+zstandard>=0.22,<1

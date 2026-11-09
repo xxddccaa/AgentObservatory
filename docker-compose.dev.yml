@@ -1,0 +1,27 @@
+version: "3.9"
+
+# 开发环境依赖：PostgreSQL 16。
+# 本机已运行 PostgreSQL 时可跳过本文件直接用；CI / 新机器可用它一键起。
+# 正式生产不要用本文件，见 docs/deployment.md。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agent-observatory-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-observatory}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local-only}
+      POSTGRES_DB: agent_observatory
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./runtime/pg-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-observatory} -d agent_observatory"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  pgdata:

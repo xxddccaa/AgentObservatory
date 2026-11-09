@@ -1,0 +1,65 @@
+# === 本地运行时（不进 Git） ===
+backend/.venv/
+backend/**/.venv/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Node ===
+node_modules/
+npm-debug.log*
+dist/
+.vite/
+coverage/
+
+# === 运行时数据（实际仅放 /root/.agent-observatory，不放共享仓库） ===
+runtime/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# === 日志与产物 ===
+*.log
+*.out
+*.pid
+
+# === 本机账号、密码与部署配置（共享目录中按机器维护，不进 Git） ===
+.env
+.env.*
+!.env.example
+config.env
+credentials.env
+*.credentials.env
+*.dump
+*.dump.gz
+*.bak
+
+# === 测试与导出 ===
+tests/**/tmp/
+tests/**/exports/
+tests/**/fixtures/local-*/
+playwright-report/
+test-results/
+.playwright-mcp/
+
+# === 敏感物 ===
+*.pem
+*.key
+*admin-password*
+*test-admin-password*
+
+# === 大二进制 / 截图 ===
+*.png
+*.jpg
+*.jpeg
+*.webp
+# (例外：docs/ 下允许放架构图)
