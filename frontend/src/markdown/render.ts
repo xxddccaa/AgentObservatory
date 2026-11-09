@@ -10,6 +10,7 @@ interface RenderEnvironment {
 export type MarkdownHighlighter = (source: string, language: string) => string;
 export type MarkdownRenderer = (source: string, highlightTerm?: string) => string;
 type MarkdownItInstance = InstanceType<typeof MarkdownIt>;
+const SAFE_BREAK_PATTERN = /^<br(?:\s*\/)?>/i;
 
 function renderHighlightedText(markdown: MarkdownItInstance, value: string, term: string): string {
   const needle = term.trim();
@@ -38,6 +39,17 @@ export function createMarkdownRenderer(highlight?: MarkdownHighlighter): Markdow
     linkify: true,
     typographer: false,
     highlight: highlight ? (source, language) => highlight(source, language) : undefined,
+  });
+
+  markdown.inline.ruler.before("html_inline", "safe_br", (state, silent) => {
+    if (state.src.charCodeAt(state.pos) !== 0x3c) return false;
+
+    const match = SAFE_BREAK_PATTERN.exec(state.src.slice(state.pos, state.posMax));
+    if (!match) return false;
+
+    if (!silent) state.push("hardbreak", "br", 0);
+    state.pos += match[0].length;
+    return true;
   });
 
   markdown.use(katex, {

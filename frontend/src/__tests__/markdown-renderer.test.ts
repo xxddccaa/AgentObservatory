@@ -12,6 +12,29 @@ describe("renderMarkdown", () => {
     expect(html).toContain("&lt;script&gt;");
   });
 
+  it("renders only br tags as hard breaks inside table cells", () => {
+    const html = renderMarkdown(
+      "| Metric | Description |\n| --- | --- |\n| Base | 基础画像与全局偏好召回率<br>(Base Persona & Global Preference Recall) |\n| Variants | one<br/>two<br />three |"
+    );
+
+    expect(html).toContain("基础画像与全局偏好召回率<br>");
+    expect(html).toContain("(Base Persona &amp; Global Preference Recall)");
+    expect(html).toMatch(/one<br>\s*two<br>\s*three/);
+    expect(html).not.toContain("&lt;br&gt;");
+  });
+
+  it("keeps non-br HTML and code spans inert", () => {
+    const html = renderMarkdown(
+      '<span style="color:red">red</span>\n\n<br class="wide">\n\n`<br>`'
+    );
+
+    expect(html).not.toContain("<span");
+    expect(html).not.toContain("<br class");
+    expect(html).toContain("&lt;span");
+    expect(html).toContain("&lt;br class=");
+    expect(html).toContain("<code>&lt;br&gt;</code>");
+  });
+
   it("renders both bracket and dollar display math", () => {
     const html = renderMarkdown(String.raw`
 \[
