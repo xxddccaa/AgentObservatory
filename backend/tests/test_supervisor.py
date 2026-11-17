@@ -141,3 +141,14 @@ def test_status_does_not_rewrite_state(tmp_path):
     before = supervisor.state_path.read_bytes()
     supervisor.status()
     assert supervisor.state_path.read_bytes() == before
+
+
+def test_default_specs_keep_worker_in_its_own_process(monkeypatch):
+    from agent_observatory.supervisor import default_specs
+
+    monkeypatch.delenv("MALLOC_ARENA_MAX", raising=False)
+    specs = default_specs()
+    assert set(specs) == {"api", "worker"}
+    assert specs["api"].command != specs["worker"].command
+    assert specs["api"].env == {"MALLOC_ARENA_MAX": "2"}
+    assert specs["worker"].env == {"MALLOC_ARENA_MAX": "2"}

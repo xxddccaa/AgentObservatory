@@ -27,7 +27,12 @@ from agent_observatory.db.models import (
     ThreadGoal,
 )
 
+from .fingerprints import sqlite_change_counter
+
 _BATCH_SIZE = 250
+#: An unchanged source is still re-read this often, so the backfill window,
+#: record counts and any write that slipped past the stat fingerprint catch up.
+_UNCHANGED_REFRESH = timedelta(hours=1)
 _SKILL_PATH_RE = re.compile(
     r"(?:^|[\s\"'])[^\"'\s]*?/skills/(?:\.system/)?(?P<name>[^/\"'\s]+)/SKILL\.md"
 )
@@ -147,12 +152,7 @@ class LocalInsightsIndexer:
                 await db.flush()
                 continue
             fingerprint = self._fingerprint(path)
-            if (
-                kind in {"state", "goals", "skills"}
-                and source.status == "indexed"
-                and source.parser_version == self.parser_version
-                and source.fingerprint_json == fingerprint
-            ):
+            if self._is_unchanged(source, fingerprint):
                 source.last_attempt_at = _utcnow()
                 results[kind] = 0
                 await db.flush()
@@ -175,7 +175,9 @@ class LocalInsightsIndexer:
                 source.status = "indexed"
                 source.last_success_at = _utcnow()
                 source.parser_version = self.parser_version
-                source.fingerprint_json = self._fingerprint(path)
+                # Store the fingerprint taken *before* reading: a write that
+                # lands while the handler runs then still differs next poll.
+                source.fingerprint_json = fingerprint
                 source.last_error_kind = None
                 source.last_error = None
                 results[kind] = count
@@ -240,18 +242,39 @@ class LocalInsightsIndexer:
             "mtime_ns": stat.st_mtime_ns,
             "inode": getattr(stat, "st_ino", 0),
         }
-        sidecars = {}
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(f"{path}{suffix}")
-            if sidecar.exists():
-                sidecar_stat = sidecar.stat()
-                sidecars[suffix[1:]] = {
-                    "byte_size": sidecar_stat.st_size,
-                    "mtime_ns": sidecar_stat.st_mtime_ns,
+        change_counter = sqlite_change_counter(path)
+        if change_counter is not None:
+            fingerprint["change_counter"] = change_counter
+        # Only the main file and its WAL carry content.  The ``-shm`` wal-index
+        # is rewritten by every reader -- including our own read-only
+        # connection -- so fingerprinting it made each poll look like a change.
+        wal = Path(f"{path}-wal")
+        if wal.exists():
+            wal_stat = wal.stat()
+            fingerprint["sidecars"] = {
+                "wal": {
+                    "byte_size": wal_stat.st_size,
+                    "mtime_ns": wal_stat.st_mtime_ns,
                 }
-        if sidecars:
-            fingerprint["sidecars"] = sidecars
+            }
         return fingerprint
+
+    def _is_unchanged(
+        self, source: LocalDataSource, fingerprint: dict[str, Any]
+    ) -> bool:
+        """True when a source can be skipped without opening it.
+
+        Opening a WAL-mode SQLite store, even read-only, rewrites its ``-shm``
+        file, so re-reading unchanged stores on every poll both burned CPU and
+        kept touching the agent's data directory.
+        """
+        return (
+            source.status == "indexed"
+            and source.parser_version == self.parser_version
+            and source.fingerprint_json == fingerprint
+            and source.last_success_at is not None
+            and _utcnow() - source.last_success_at < _UNCHANGED_REFRESH
+        )
 
     @staticmethod
     def _connect(path: Path) -> sqlite3.Connection:

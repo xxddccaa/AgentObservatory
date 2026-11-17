@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .tree_cache import cached_resolve, rglob_cached
+
 
 @dataclass(frozen=True, slots=True)
 class StepCodeItem:
@@ -67,7 +69,7 @@ class StepCodeImporter:
             return []
         paths = [
             path
-            for path in self.root.rglob("thread_history_*.sqlite")
+            for path in rglob_cached(self, self.root, "thread_history_*.sqlite")
             if path.is_file()
         ]
         return sorted(paths, key=lambda path: path.stat().st_mtime_ns, reverse=True)
@@ -75,7 +77,7 @@ class StepCodeImporter:
     @staticmethod
     def source_identity(path: str | Path, thread_id: str) -> str:
         """Build a stable, collision-resistant identity for a source thread."""
-        resolved = str(Path(path).expanduser().resolve())
+        resolved = str(cached_resolve(Path(path).expanduser()))
         digest = hashlib.sha256(f"stepcode_sqlite\0{resolved}\0{thread_id}".encode()).hexdigest()
         return f"stepcode:{digest}"
 

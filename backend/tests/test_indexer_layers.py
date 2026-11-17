@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -139,6 +141,52 @@ def test_stepcode_adapter_plans_append_then_existing_update_rebuild(
     connection.commit()
     connection.close()
     assert adapter.plan(source, checkpoint).action == PlanAction.REBUILD
+
+
+@pytest.mark.anyio
+async def test_unchanged_stepcode_store_is_not_reopened_by_fast_cycles(
+    tmp_path: Path, db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a read-only SQLite connection rewrites the agent's ``-shm``."""
+    sqlite_root = tmp_path / "stepcode"
+    sqlite_root.mkdir()
+    path = sqlite_root / "thread_history_1.sqlite"
+    _stepcode_db(path)
+    stamp = time.time() - 7200
+    for item in (path, sqlite_root):
+        os.utime(item, (stamp, stamp))
+    factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    orchestrator = IndexerOrchestrator(
+        factory,
+        scanner=RolloutScanner(tmp_path / "empty-codex"),
+        stepcode=StepCodeImporter(sqlite_root),
+        worker_id="indexer-stepcode-fast",
+        started_at=datetime.now(UTC),
+    )
+    assert await orchestrator.scan_once() == 1
+    assert await orchestrator.scan_once(full=False) == 0
+
+    opened: list[Path] = []
+    original = StepCodeImporter._connect
+
+    def counting_connect(store: Path) -> sqlite3.Connection:
+        opened.append(store)
+        return original(store)
+
+    monkeypatch.setattr(StepCodeImporter, "_connect", staticmethod(counting_connect))
+    assert await orchestrator.scan_once(full=False) == 0
+    assert await orchestrator.scan_once(full=True) == 0
+    assert opened == []
+
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO thread_items VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("thread-a", "turn-b", "item-b", 2, 2000, "{}", "assistantMessage", 2),
+    )
+    connection.commit()
+    connection.close()
+    assert await orchestrator.scan_once(full=False) == 1
+    assert opened
 
 
 @pytest.mark.anyio

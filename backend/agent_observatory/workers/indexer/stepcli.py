@@ -106,6 +106,10 @@ class StepCliNativeSource:
             )
         return result
 
+    def watch_paths(self, source: SourceDescriptor) -> tuple[Path, ...]:
+        """Every file whose change can alter ``plan``."""
+        return (source.path, source.path.with_name("events.jsonl"))
+
     def plan(
         self, source: SourceDescriptor, checkpoint: Any | None
     ) -> SourcePlan:

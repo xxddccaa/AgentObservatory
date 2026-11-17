@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import delete, event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from agent_observatory.db.models import AgentSession
+from agent_observatory.db.models import AgentSession, IndexCheckpoint, WorkerHeartbeat
 from agent_observatory.workers.indexer import IndexerWorker
 from agent_observatory.workers.indexer.linking import SessionLinker
 
@@ -979,7 +981,7 @@ async def test_scan_and_local_loops_never_write_concurrently(
             state["active"] -= 1
         return 0
 
-    async def fake_scan():
+    async def fake_scan(*, full: bool = True):
         return await body(0.05, "scans")
 
     async def fake_local():
@@ -1053,3 +1055,114 @@ async def test_fast_path_refreshes_mtime_derived_status(
         assert await project_events(db, session) is False
         assert session.is_ongoing is False
         assert session.end_time is not None
+
+
+def _age_tree(root: Path, seconds_ago: float = 7200) -> None:
+    """Back-date a fixture so nothing in it is inside the racy window."""
+    stamp = time.time() - seconds_ago
+    for path in [*root.rglob("*"), root]:
+        os.utime(path, (stamp, stamp))
+
+
+@pytest.mark.anyio
+async def test_idle_fast_cycle_issues_no_queries(
+    tmp_path: Path, db_session: AsyncSession
+) -> None:
+    """The 2 s fast cycle settles unchanged sources without the database."""
+    root = tmp_path / "sessions"
+    for index in range(5):
+        _write(root / "2026" / "08" / "21" / f"rollout-fast-{index}.jsonl", f"thread-fast-{index}")
+    _age_tree(root)
+    factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    worker = IndexerWorker(factory, sessions_root=root, worker_id="indexer-fast")
+    orchestrator = worker.orchestrator
+
+    assert await worker.scan_once() == 5
+    assert await orchestrator.scan_once(full=False) == 0  # settles every source
+    async with factory() as db:
+        before = await db.get(WorkerHeartbeat, "indexer-fast")
+        assert before is not None
+        heartbeat_at = before.heartbeat_at
+
+    with _StatementCounter(db_session.bind) as counter:
+        assert await orchestrator.scan_once(full=False) == 0
+    assert counter.total == 0, counter.by_kind
+    stats = orchestrator.last_cycle
+    assert (stats.unchanged, stats.changed, stats.finished) == (5, 0, True)
+
+    # The heartbeat loop still publishes the idle cycle's success.
+    await orchestrator.heartbeat()
+    async with factory() as db:
+        row = await db.get(WorkerHeartbeat, "indexer-fast")
+        assert row is not None
+        assert row.heartbeat_at > heartbeat_at
+        assert row.last_success_at == orchestrator._last_success_at
+        assert row.metadata_json["last_cycle"]["unchanged"] == 5
+
+
+@pytest.mark.anyio
+async def test_fast_cycle_picks_up_appends_and_new_sessions(
+    tmp_path: Path, db_session: AsyncSession
+) -> None:
+    root = tmp_path / "sessions"
+    old = root / "2026" / "08" / "21" / "rollout-old.jsonl"
+    _write(old, "thread-old")
+    _age_tree(root)
+    factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    worker = IndexerWorker(factory, sessions_root=root, worker_id="indexer-fast-new")
+    orchestrator = worker.orchestrator
+    assert await worker.scan_once() == 1
+    assert await orchestrator.scan_once(full=False) == 0
+
+    # Resuming a long-idle session appends to an old file.
+    with old.open("a") as handle:
+        handle.write(json.dumps({
+            "timestamp": "2026-08-21T10:00:02Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "resumed"},
+        }) + "\n")
+    assert await orchestrator.scan_once(full=False) == 1
+
+    # A new day starts a new dated folder below an existing ancestor.
+    _write(root / "2026" / "08" / "22" / "rollout-new.jsonl", "thread-new")
+    assert await orchestrator.scan_once(full=False) == 1
+    async with factory() as db:
+        threads = set((await db.scalars(select(AgentSession.thread_id))).all())
+    assert threads == {"thread-old", "thread-new"}
+
+
+@pytest.mark.anyio
+async def test_full_cycle_repairs_checkpoints_changed_behind_the_worker(
+    tmp_path: Path, db_session: AsyncSession
+) -> None:
+    root = tmp_path / "sessions"
+    _write(root / "2026" / "08" / "21" / "rollout-purged.jsonl", "thread-purged")
+    _age_tree(root)
+    factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    worker = IndexerWorker(factory, sessions_root=root, worker_id="indexer-purged")
+    orchestrator = worker.orchestrator
+    assert await worker.scan_once() == 1
+    assert await orchestrator.scan_once(full=False) == 0
+
+    async with factory() as db:
+        await db.execute(delete(IndexCheckpoint))
+        await db.commit()
+    # Only this worker writes checkpoints, so fast cycles trust their memo...
+    assert await orchestrator.scan_once(full=False) == 0
+    # ...and the periodic full cycle re-reads every checkpoint.
+    assert await orchestrator.scan_once(full=True) == 1
+
+
+@pytest.mark.anyio
+async def test_recently_modified_sources_are_not_settled(
+    tmp_path: Path, db_session: AsyncSession
+) -> None:
+    """A file written within the racy window may change again in the same
+    mtime tick, so its signature must not be trusted yet."""
+    root = tmp_path / "sessions"
+    _write(root / "2026" / "08" / "21" / "rollout-racy.jsonl", "thread-racy")
+    factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    worker = IndexerWorker(factory, sessions_root=root, worker_id="indexer-racy")
+    assert await worker.scan_once() == 1
+    assert await worker.orchestrator.scan_once(full=False) == 0
+    assert worker.orchestrator._settled == {}

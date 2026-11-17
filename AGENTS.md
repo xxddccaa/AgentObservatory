@@ -48,6 +48,47 @@ Agent Observatory 是一个**本地优先、只读、可审计、多用户**的�
 - 部署失败保留原运行版本与备份；不要自动降级数据库或清空历史，也不要创建 commit 或强制推送。
 - 详细操作和验证见 `docs/deployment.md`。
 
+### 低资源部署（小内存机器同样适用）
+
+**原则：降耗不能影响使用体验。** 凡是会让页面变慢、数据出现得更晚或降低故障隔离的手段都不采用，
+包括把 indexer 并入 API 进程和放慢轮询（2026-11-17 试过并已撤回）。默认配置即可直接部署到小机器。
+
+- **进程模型不变**：supervisor + api + worker 三个进程，worker 独立崩溃、独立重启，
+  首次大批量导入时也不会拖慢页面。
+- **轮询不变**：`AGENT_OBS_INDEXER_POLL_INTERVAL=2`、`AGENT_OBS_LOCAL_SOURCE_POLL_INTERVAL=5`（秒）。
+- **增量扫描**（实现见 `workers/indexer/tree_cache.py`，细节见 `docs/architecture.md`）：每 2 秒仍 stat 全部已知
+  会话文件，追加内容（包括恢复很久以前的会话）照常在一个轮询周期内入库；新会话靠目录修改时间发现，
+  只检查有会话的目录、它们的上级目录和最近 10 分钟改动过的目录；所有目录至少每 10 秒校验一次，
+  每 10 分钟完整重列一次；每 60 秒一次完整周期，重新核对所有 checkpoint 并执行维护。没有变化的
+  来源不查数据库、不打开 SQLite、不重复 resolve 路径；空闲周期不写心跳（心跳任务仍每 10 秒写一次）。
+  修改扫描逻辑时不得退化为每轮 `rglob` 全量遍历，也不得让追加内容的发现晚于一个轮询周期。
+- **跳过未变化的本机 SQLite 源**：指纹只看主库、`-wal` 和库头 change counter，不看读者每次都会
+  改写的 `-shm`。没有变化就不打开库，既省 CPU，也不再改写 agent 目录下的 shm 文件；
+  任何写入都落在主库或 WAL 上，下一轮轮询照常发现；每小时还有一次兜底重读。
+- **内存回收**：supervisor 给 api / worker 设 `MALLOC_ARENA_MAX=2`；worker 只在真正入库后执行
+  `gc.collect()` + `malloc_trim(0)`，不在 API 进程里做。
+- **PostgreSQL**：`deploy` / `up` 每次用 `ALTER SYSTEM` 设置 `shared_buffers=32MB`、
+  `max_connections=100`（PostgreSQL 默认值；降到 40 只省约 3 MB，却会压缩连接余量，所以不降）、
+  `jit=off`、`maintenance_work_mem=32MB`、`default_toast_compression=lz4`。用 `AGENT_OBS_PG_<NAME>`
+  覆盖，例如 `AGENT_OBS_PG_SHARED_BUFFERS=128MB`；值只允许字母、数字、`_` 和 `.`。
+  `shared_buffers` / `max_connections` 需要重启 PostgreSQL：`deploy` 在经 CLI 停掉旧应用、备份之后重启；
+  `up` 只在应用未运行时重启；`--prepare-only` 只 reload，绝不在应用运行时重启。
+  lz4 主要省 CPU，实测体积只比 pglz 小约 3%，且只作用于新写入的数据。
+- **运行时依赖**：激活时执行 `uv sync --locked --no-dev`，去掉 pytest / mypy / ruff。
+  已激活的快照不能再跑后端测试，需要测试时用 `./manage.sh deploy --prepare-only` 生成新快照。
+- **部署峰值高于运行时**：`uv sync`、`npm ci`、`vite build` 都在本机快照内执行；1 GB 内存的机器
+  部署时建议临时加 swap，或在部署窗口内关闭其他服务。
+- **磁盘**：`releases/` 和 `backups/` 不会自动清理（每次部署都会 `pg_dump` 一份），
+  小磁盘机器需人工删除旧快照和旧备份，保留 `current` 指向的版本和最近的备份。
+- **参考实测**（2026-11-17，约 310 个会话，数据库 2.9 GB，PSS 口径）：调整前约 515 MB
+  （supervisor 52 + api 94 + worker 179 + PostgreSQL 190，worker 已连续运行 7 天）；调整后正常使用
+  约 306 MB（supervisor 50 + api 97 + worker 65 + PostgreSQL 99，worker 刚启动，长期值待观察）。
+  增量扫描上线后，worker CPU 从约 5.7% 降到约 0.65%（空闲快周期约 6 ms CPU，原来每轮约 110 ms），
+  PostgreSQL 约 0.07%；会话追加内容 0.3–1.8 秒入库，和原来一样在 2 秒轮询内。
+- **已知的内存峰值**：打开超大会话的 Timeline（1.2 万条事件、41.7 MB 响应）时，
+  `/api/codex/sessions/{id}/events` 一次性序列化全部事件，耗时约 2.8 秒，api 峰值约 300 MB；
+  这是现有接口行为，与上述配置无关。
+
 网络：访问 GitHub 使用本机 `127.0.0.1:10826` 代理，访问公司 GitLab 必须直连。
 需要代理下载 npm 依赖时，在本机 `config.env` 设置 `AGENT_OBS_DEPLOY_PROXY`，
 不要修改共享 `.npmrc` 或把代理凭据写入仓库。
@@ -179,6 +220,11 @@ uv run python -m py_compile $(find agent_observatory -name '*.py')
 LC_ALL=C.UTF-8 TZ=UTC npm run check      # vue-tsc + vitest，固定测试区域与时区
 E2E_DATABASE_URL="$TEST_DATABASE_URL" npx playwright test
 ```
+
+Playwright 版本与本机缓存的浏览器不一致时，用 `PW_CHROMIUM_PATH` 指向
+`~/.cache/ms-playwright/` 下已有的 `chrome-headless-shell`，不要在共享仓库里安装浏览器。
+测试只需导出 `TEST_DATABASE_URL`；不要把整份 `config.env` 导入环境，否则
+`AGENT_OBS_PORT` 等变量会覆盖测试自带的配置文件。
 
 Git 校验在共享源码仓库根目录单独执行 `git diff --check`；本机快照不包含 `.git`。
 

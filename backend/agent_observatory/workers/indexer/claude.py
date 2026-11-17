@@ -20,6 +20,7 @@ from agent_observatory.db.models import (
 
 from .adapters import PlanAction, SourceDescriptor, SourcePlan
 from .claude_parser import ClaudeRecord, content_blocks, iter_records
+from .tree_cache import cached_resolve, rglob_cached
 
 
 def _id(prefix: str, value: str) -> str:
@@ -85,7 +86,7 @@ class ClaudeJsonlSource:
 
     @staticmethod
     def identity_for(path: Path, agent: str) -> str:
-        canonical = str(path.resolve())
+        canonical = str(cached_resolve(path))
         digest = hashlib.sha256(f"{agent}\0{canonical}".encode()).hexdigest()
         return f"claude:{agent}:{digest}"
 
@@ -106,7 +107,10 @@ class ClaudeJsonlSource:
     def discover(self) -> list[SourceDescriptor]:
         if not self.root.exists():
             return []
-        paths = sorted((p for p in self.root.rglob("*.jsonl") if p.is_file()), key=lambda p: str(p))
+        paths = sorted(
+            (p for p in rglob_cached(self, self.root, "*.jsonl") if p.is_file()),
+            key=lambda p: str(p),
+        )
         return [
             SourceDescriptor(
                 kind=self.kind,

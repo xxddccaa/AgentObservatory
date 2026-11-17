@@ -19,6 +19,7 @@ from agent_observatory.db.models import (
 )
 
 from .adapters import PlanAction, SourceDescriptor, SourcePlan
+from .tree_cache import cached_resolve, rglob_cached
 
 
 def _id(prefix: str, value: str) -> str:
@@ -84,13 +85,13 @@ class OpenCodeJsonSource:
 
     @staticmethod
     def identity(path: Path) -> str:
-        return "opencode:" + hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+        return "opencode:" + hashlib.sha256(str(cached_resolve(path)).encode()).hexdigest()
 
     def discover(self) -> list[SourceDescriptor]:
         if not self.root.exists():
             return []
         paths = []
-        for p in self.root.rglob("*.json"):
+        for p in rglob_cached(self, self.root, "*.json"):
             if any(part in {"session", "sessions"} for part in p.parts):
                 paths.append(p)
         return [

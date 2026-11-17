@@ -8,6 +8,7 @@ import getpass
 import json
 import os
 import pwd
+import re
 import secrets
 import shlex
 import shutil
@@ -22,6 +23,22 @@ EXCLUDED_PARTS = {
     ".git", ".venv", "venv", "node_modules", "dist", "runtime", "__pycache__",
     ".pytest_cache", ".ruff_cache", ".mypy_cache", "test-results", "playwright-report",
 }
+#: Small-footprint profile for the dedicated single-user PostgreSQL instance,
+#: applied with ALTER SYSTEM on every deploy / start.  Override one entry with
+#: AGENT_OBS_PG_<NAME> in config.env (e.g. AGENT_OBS_PG_SHARED_BUFFERS=128MB).
+POSTGRES_SETTINGS = {
+    "shared_buffers": "32MB",
+    # Kept at the PostgreSQL default: 100 -> 40 saved only ~3 MB of shared
+    # memory but left little headroom for API/worker pools plus CI tests.
+    # Stated explicitly so machines that briefly ran with 40 return to 100.
+    "max_connections": "100",
+    "jit": "off",
+    "maintenance_work_mem": "32MB",
+    "default_toast_compression": "lz4",
+}
+#: Settings that only take effect after a PostgreSQL restart.
+POSTGRES_RESTART_SETTINGS = ("shared_buffers", "max_connections")
+_SETTING_VALUE = re.compile(r"[A-Za-z0-9_.]+")
 
 
 def run(command: list[str], *, cwd: Path | None = None, env: dict | None = None,
@@ -126,6 +143,50 @@ def database_env(config: dict[str, str]) -> tuple[dict[str, str], list[str]]:
     return environment, connection
 
 
+def postgres_settings(config: dict[str, str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for name, default in POSTGRES_SETTINGS.items():
+        key = f"AGENT_OBS_PG_{name.upper()}"
+        value = (config.get(key) or default).strip()
+        if not _SETTING_VALUE.fullmatch(value):
+            raise ValueError(f"invalid {key} value")
+        values[name] = value
+    return values
+
+
+def superuser_psql(home: Path, config: dict[str, str], binaries: Path) -> list[str]:
+    port = urlparse(config["AGENT_OBS_DATABASE_URL"]).port
+    return ["runuser", "-u", "postgres", "--", str(binaries / "psql"), "-X", "-qAt",
+            "-v", "ON_ERROR_STOP=1", "-h", str(home / "postgresql" / "run"),
+            "-p", str(port), "-d", "postgres"]
+
+
+def tune_postgresql(home: Path, config: dict[str, str], binaries: Path) -> bool:
+    """Apply the small-footprint profile; return True if a restart is pending.
+
+    Reloadable settings take effect immediately.  The pending check compares
+    the running value with the target directly instead of trusting
+    ``pending_restart``, which is only refreshed once the reload signal lands.
+    """
+    values = postgres_settings(config)
+    psql = superuser_psql(home, config, binaries)
+    statements = "".join(f"ALTER SYSTEM SET {name} = '{value}';\n" for name, value in values.items())
+    run(psql, input_text=statements + "SELECT pg_reload_conf();\n", capture=True)
+    pairs = ", ".join(f"('{name}', '{values[name]}')" for name in POSTGRES_RESTART_SETTINGS)
+    pending = run(psql, capture=True, input_text=(
+        "SELECT bool_or(pg_size_bytes(current_setting(name)) <> pg_size_bytes(target)) "
+        f"FROM (VALUES {pairs}) AS wanted(name, target);\n"
+    ))
+    return pending == "t"
+
+
+def restart_postgresql(home: Path, binaries: Path) -> None:
+    postgres = home / "postgresql"
+    print("Restarting machine-local PostgreSQL to apply memory settings", flush=True)
+    run(["runuser", "-u", "postgres", "--", str(binaries / "pg_ctl"), "-D", str(postgres / "data"),
+         "-l", str(postgres / "logs" / "startup.log"), "-m", "fast", "-w", "restart"], cwd=postgres)
+
+
 def ensure_postgresql(home: Path, config: dict[str, str]) -> Path:
     binaries = Path(os.environ.get("AGENT_OBS_PG_BIN", "/usr/lib/postgresql/16/bin"))
     for executable in ("initdb", "pg_ctl", "psql", "pg_dump"):
@@ -170,8 +231,7 @@ def ensure_postgresql(home: Path, config: dict[str, str]) -> Path:
     if status.returncode != 0:
         run([*prefix, str(binaries / "pg_ctl"), "-D", str(data), "-l", str(logs / "startup.log"), "-w", "start"], cwd=postgres)
     url = urlparse(config["AGENT_OBS_DATABASE_URL"])
-    psql = [*prefix, str(binaries / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
-            "-h", str(sockets), "-p", str(url.port), "-d", "postgres"]
+    psql = superuser_psql(home, config, binaries)
     username, password = unquote(url.username or ""), unquote(url.password or "")
     if username != "observatory":
         raise ValueError("the dedicated deployment database role must be observatory")
@@ -184,11 +244,7 @@ def ensure_postgresql(home: Path, config: dict[str, str]) -> Path:
     return binaries
 
 
-def build(root: Path, home: Path) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(3)
-    release = home / "releases" / stamp
-    print(f"Building machine-local release {release}", flush=True)
-    copy_source(root, release)
+def build_env(home: Path) -> dict[str, str]:
     environment = os.environ.copy()
     environment.pop("VIRTUAL_ENV", None)
     environment.pop("UV_PROJECT_ENVIRONMENT", None)
@@ -198,6 +254,17 @@ def build(root: Path, home: Path) -> Path:
     if proxy:
         environment["npm_config_proxy"] = proxy
         environment["npm_config_https_proxy"] = proxy
+    return environment
+
+
+def build(root: Path, home: Path) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(3)
+    release = home / "releases" / stamp
+    print(f"Building machine-local release {release}", flush=True)
+    copy_source(root, release)
+    environment = build_env(home)
+    # Dev tools stay installed so the prepared snapshot can run its tests;
+    # activation strips them again.
     run(["uv", "sync", "--locked"], cwd=release / "backend", env=environment)
     run(["npm", "ci", "--cache", str(home / "cache" / "npm")], cwd=release / "frontend", env=environment)
     run(["npm", "run", "build"], cwd=release / "frontend", env=environment)
@@ -225,11 +292,20 @@ def switch_release(home: Path, release: Path) -> None:
     link.replace(home / "current")
 
 
-def activate(release: Path, home: Path, config: dict[str, str], binaries: Path) -> None:
+def supervisor_alive(release: Path, home: Path) -> bool:
+    python = release / "backend" / ".venv" / "bin" / "python"
+    return run([str(python), "-c", "from agent_observatory.supervisor import read_supervisor_pid; import os; print(bool(read_supervisor_pid(os.environ['AGENT_OBS_HOME'])))"], env=application_env(home), capture=True) == "True"
+
+
+def activate(release: Path, home: Path, config: dict[str, str], binaries: Path,
+             restart_pending: bool = False) -> None:
     previous = (home / "current").resolve() if (home / "current").is_symlink() else None
     environment = application_env(home)
     python = release / "backend" / ".venv" / "bin" / "python"
-    alive = run([str(python), "-c", "from agent_observatory.supervisor import read_supervisor_pid; import os; print(bool(read_supervisor_pid(os.environ['AGENT_OBS_HOME'])))"], env=environment, capture=True) == "True"
+    # The running service never needs pytest / mypy / ruff; dropping them
+    # before anything is stopped keeps a failure here harmless.
+    run(["uv", "sync", "--locked", "--no-dev"], cwd=release / "backend", env=build_env(home))
+    alive = supervisor_alive(release, home)
     if alive and previous is None:
         raise ValueError("legacy supervisor detected: migrate its database and stop it through the CLI before activation")
     db_environment, connection = database_env(config)
@@ -240,6 +316,8 @@ def activate(release: Path, home: Path, config: dict[str, str], binaries: Path) 
     if alive:
         cli(previous, home, ["down"])
     try:
+        if restart_pending:
+            restart_postgresql(home, binaries)
         run([str(python), "-m", "alembic", "upgrade", "head"], cwd=release / "backend", env=environment)
         run([str(python), "-m", "alembic", "check"], cwd=release / "backend", env=environment)
         credentials = read_config(home / "credentials.env")
@@ -274,8 +352,7 @@ def activate(release: Path, home: Path, config: dict[str, str], binaries: Path) 
     except BaseException:
         if previous is not None:
             try:
-                current_alive = run([str(python), "-c", "from agent_observatory.supervisor import read_supervisor_pid; import os; print(bool(read_supervisor_pid(os.environ['AGENT_OBS_HOME'])))"], env=application_env(home), capture=True) == "True"
-                if current_alive:
+                if supervisor_alive(release, home):
                     cli(release, home, ["down"])
                 switch_release(home, previous)
                 if alive:
@@ -325,8 +402,13 @@ def main() -> int:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = configure(home)
         binaries = ensure_postgresql(home, config)
+        restart_pending = tune_postgresql(home, config, binaries)
         if arguments.start_only:
-            cli((home / "current").resolve(strict=True), home, ["up"])
+            current = (home / "current").resolve(strict=True)
+            # Never bounce PostgreSQL under a running application.
+            if restart_pending and not supervisor_alive(current, home):
+                restart_postgresql(home, binaries)
+            cli(current, home, ["up"])
             return 0
         release = arguments.release.resolve() if arguments.release else build(SOURCE_ROOT, home)
         if not release.is_relative_to(home / "releases") or not (release / "backend" / ".venv" / "bin" / "python").is_file():
@@ -334,7 +416,7 @@ def main() -> int:
         if arguments.prepare_only:
             print(f"Prepared release (not activated): {release}", flush=True)
             return 0
-        activate(release, home, config, binaries)
+        activate(release, home, config, binaries, restart_pending)
     return 0
 
 

@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import gc
 import logging
 import os
 import socket
+import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -37,6 +43,48 @@ def _error_summary(exc: BaseException | None) -> dict[str, str] | None:
     if exc is None:
         return None
     return {"kind": type(exc).__name__, "message": str(exc)[:500]}
+
+
+@lru_cache(maxsize=1)
+def _malloc_trim() -> Callable[[int], int] | None:
+    try:
+        trim: Callable[[int], int] = ctypes.CDLL("libc.so.6").malloc_trim
+    except (OSError, AttributeError):  # musl / non-Linux: nothing to trim
+        return None
+    return trim
+
+
+#: The local loop runs a real pass (database included) at least this often.
+_LOCAL_FULL_INTERVAL = 60.0
+_RACY_WINDOW = 2.0
+
+
+def _mtimes(value: Any) -> list[int]:
+    """Every ``*mtime*`` integer inside a fingerprint structure."""
+    if isinstance(value, dict):
+        found: list[int] = []
+        for key, item in value.items():
+            if "mtime" in str(key) and isinstance(item, int):
+                found.append(item)
+            else:
+                found.extend(_mtimes(item))
+        return found
+    if isinstance(value, (list, tuple)):
+        return [mtime for item in value for mtime in _mtimes(item)]
+    return []
+
+
+def release_memory() -> None:
+    """Hand heap freed by an ingest burst back to the operating system.
+
+    CPython drops parsed rows promptly, but glibc keeps the freed pages mapped,
+    so one large backfill would otherwise pin its peak RSS for the lifetime of
+    the process.  Called only after cycles that actually ingested something.
+    """
+    gc.collect()
+    trim = _malloc_trim()
+    if trim is not None:
+        trim(0)
 
 
 class IndexerWorker:
@@ -119,17 +167,27 @@ class IndexerWorker:
     async def _scan_loop(self) -> None:
         """Poll rollout / SQLite session sources at the configured interval.
 
-        An unexpected cycle failure is recorded on the orchestrator (so the
-        heartbeat flips to ``degraded``) and the loop keeps polling instead of
-        tearing down its sibling tasks.
+        Every poll is a fast cycle (see ``IndexerOrchestrator.scan_once``)
+        except one full cycle every ``FULL_CYCLE_INTERVAL`` seconds, starting
+        with the first.  An unexpected cycle failure is recorded on the
+        orchestrator (so the heartbeat flips to ``degraded``) and the loop
+        keeps polling instead of tearing down its sibling tasks.
         """
+        loop = asyncio.get_running_loop()
+        next_full = loop.time()
         while not self._stop.is_set():
+            indexed = 0
+            full = loop.time() >= next_full
+            if full:
+                next_full = loop.time() + self.orchestrator.FULL_CYCLE_INTERVAL
             try:
                 async with self._write_lock:
-                    await self.orchestrator.scan_once()
+                    indexed = await self.orchestrator.scan_once(full=full)
             except Exception as exc:  # noqa: BLE001 - one bad cycle must not stop polling
                 self.orchestrator.last_error = exc
                 logger.warning("indexer cycle failed: %s", exc)
+            if indexed:
+                release_memory()
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval)
 
@@ -144,8 +202,27 @@ class IndexerWorker:
         if self.local_insights is None and self.memory_indexer is None:
             return
         interval = max(settings().local_source_poll_interval, 0.001)
+        loop = asyncio.get_running_loop()
+        next_full = loop.time()
+        settled: tuple[Any, ...] | None = None
         while not self._stop.is_set():
-            started = asyncio.get_running_loop().time()
+            started = loop.time()
+            signature = self._local_signature()
+            if loop.time() < next_full and signature is not None and signature == settled:
+                # Every local file is exactly as the last clean pass saw it,
+                # so that pass's per-source gates would all skip anyway; do
+                # not spend a dozen queries and a commit to find that out.
+                self.orchestrator.aux_metadata["local_scan"] = {
+                    "changed_sources": 0,
+                    "duration_ms": round((loop.time() - started) * 1000, 1),
+                    "error": _error_summary(self.last_local_error),
+                }
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=max(0.0, interval - (loop.time() - started))
+                    )
+                continue
+            next_full = started + _LOCAL_FULL_INTERVAL
             try:
                 async with self._write_lock:
                     changed = await self.scan_local_once()
@@ -157,6 +234,18 @@ class IndexerWorker:
                 self.last_local_error = exc
                 changed = 0
                 logger.warning("local scan failed: %s", exc)
+            if changed:
+                release_memory()
+            settled = (
+                signature
+                if signature is not None
+                and self.last_local_error is None
+                and not any(
+                    abs(time.time() - mtime / 1e9) < _RACY_WINDOW
+                    for mtime in _mtimes(signature)
+                )
+                else None
+            )
             elapsed = asyncio.get_running_loop().time() - started
             self.orchestrator.aux_metadata["local_scan"] = {
                 "changed_sources": changed,
@@ -167,6 +256,25 @@ class IndexerWorker:
                 await asyncio.wait_for(
                     self._stop.wait(), timeout=max(0.0, interval - elapsed)
                 )
+
+    def _local_signature(self) -> tuple[Any, ...] | None:
+        """Stat-only fingerprints of every local source, as their own gates
+        compute them; ``None`` when they cannot be computed."""
+        parts: list[Any] = []
+        try:
+            if self.local_insights is not None:
+                for kind, path in self.local_insights.paths.items():
+                    parts.append(
+                        (kind, self.local_insights._fingerprint(path) if path.exists() else None)
+                    )
+            if self.memory_indexer is not None:
+                for _agent, kind, path, _format in self.memory_indexer.sources:
+                    parts.append(
+                        (kind, self.memory_indexer._fingerprint(kind, path) if path.exists() else None)
+                    )
+        except (AttributeError, OSError):
+            return None
+        return tuple(parts)
 
     async def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():

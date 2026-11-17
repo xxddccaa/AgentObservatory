@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -403,6 +406,70 @@ async def test_ingests_local_sources_read_only_and_idempotently(
     assert turn.active_tool_ms == 225
 
 
+def test_fingerprint_tracks_content_files_but_not_shm(tmp_path: Path) -> None:
+    database = tmp_path / "store.sqlite"
+    header = b"SQLite format 3\x00" + bytes(8) + (7).to_bytes(4, "big") + bytes(72)
+    database.write_bytes(header)
+    wal = tmp_path / "store.sqlite-wal"
+    shm = tmp_path / "store.sqlite-shm"
+    wal.write_bytes(b"w" * 16)
+    shm.write_bytes(b"s" * 16)
+    base = LocalInsightsIndexer._fingerprint(database)
+    assert base["change_counter"] == 7
+    assert set(base["sidecars"]) == {"wal"}
+
+    # Every reader -- our own read-only connection included -- rewrites the
+    # wal-index; that alone must not look like new data.
+    shm.write_bytes(b"t" * 64)
+    assert LocalInsightsIndexer._fingerprint(database) == base
+
+    # An in-place rollback-journal write that keeps size and mtime is still
+    # caught by the header change counter.
+    stat = database.stat()
+    database.write_bytes(header[:24] + (8).to_bytes(4, "big") + header[28:])
+    os.utime(database, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert LocalInsightsIndexer._fingerprint(database)["change_counter"] == 8
+
+    wal.write_bytes(b"w" * 32)
+    assert LocalInsightsIndexer._fingerprint(database)["sidecars"] != base["sidecars"]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_local_sources_are_not_reopened(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_sources(tmp_path, datetime.now(UTC).replace(microsecond=0))
+    indexer = LocalInsightsIndexer(tmp_path, backfill_days=90)
+    await indexer.ingest_all(db_session)
+    await db_session.flush()
+
+    # Simulate the wal-index churn an idle Codex store sees on every read.
+    (tmp_path / "thread_history_1.sqlite-shm").write_bytes(b"\0" * 32768)
+
+    opened: list[str] = []
+    original_connect = LocalInsightsIndexer._connect
+
+    def counting_connect(path: Path) -> sqlite3.Connection:
+        opened.append(path.name)
+        return original_connect(path)
+
+    monkeypatch.setattr(LocalInsightsIndexer, "_connect", staticmethod(counting_connect))
+    second = await indexer.ingest_all(db_session)
+    assert opened == []
+    assert set(second.values()) == {0}
+
+    # Unchanged sources are still re-read periodically so the backfill window
+    # and record counts catch up while the agent is idle.
+    thread_history = await db_session.scalar(
+        select(LocalDataSource).where(LocalDataSource.source_kind == "thread_history")
+    )
+    assert thread_history is not None
+    thread_history.last_success_at = datetime.now(UTC) - timedelta(hours=2)
+    await db_session.flush()
+    await indexer.ingest_all(db_session)
+    assert opened == ["thread_history_1.sqlite"]
+
+
 @pytest.mark.asyncio
 async def test_malformed_source_degrades_without_blocking_other_sources(
     db_session: AsyncSession, tmp_path: Path
@@ -478,3 +545,40 @@ async def test_indexer_worker_audits_only_changed_local_sources(
         )
     assert len(rows) == 1
     assert rows[0].detail["changed_sources"] == ["fake"]
+
+
+@pytest.mark.asyncio
+async def test_local_loop_skips_the_database_while_sources_are_unchanged(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_observatory.config import settings
+
+    _seed_sources(tmp_path, datetime.now(UTC).replace(microsecond=0))
+    stamp = time.time() - 7200
+    for path in [*tmp_path.rglob("*"), tmp_path]:
+        os.utime(path, (stamp, stamp))
+    factory = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    worker = IndexerWorker(
+        factory, sessions_root=tmp_path / "sessions", worker_id="indexer-local-skip"
+    )
+    worker.local_insights = LocalInsightsIndexer(tmp_path)
+    worker.memory_indexer = None
+    monkeypatch.setattr(settings(), "local_source_poll_interval", 0.01)
+    passes: list[int] = []
+    original = worker.scan_local_once
+
+    async def counting_pass() -> int:
+        passes.append(1)
+        return await original()
+
+    monkeypatch.setattr(worker, "scan_local_once", counting_pass)
+    task = asyncio.create_task(worker._local_loop())
+    try:
+        await asyncio.sleep(0.3)
+        assert len(passes) == 1  # one real pass, then cheap skips
+        os.utime(tmp_path / "logs_2.sqlite", None)  # any write moves the mtime
+        await asyncio.sleep(0.1)
+        assert len(passes) >= 2
+    finally:
+        await worker.stop()
+        await asyncio.wait_for(task, timeout=5)

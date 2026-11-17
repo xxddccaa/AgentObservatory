@@ -22,6 +22,7 @@ from agent_observatory.db.models import (
 from .adapters import PlanAction, SourceDescriptor, SourcePlan
 from .fingerprints import file_fingerprint, indexed_content_matches
 from .pi_parser import PiRecord, content_blocks, iter_records
+from .tree_cache import cached_resolve, rglob_cached
 
 _ONGOING_MTIME_SECONDS = 60
 _TOOL_KINDS = {
@@ -156,14 +157,14 @@ class PiJsonlSource:
 
     @staticmethod
     def identity(path: Path) -> str:
-        digest = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+        digest = hashlib.sha256(str(cached_resolve(path)).encode()).hexdigest()
         return f"pi:{digest}"
 
     def discover(self) -> list[SourceDescriptor]:
         if not self.root.exists():
             return []
         paths = sorted(
-            (path for path in self.root.rglob("*.jsonl") if path.is_file()),
+            (path for path in rglob_cached(self, self.root, "*.jsonl") if path.is_file()),
             key=lambda path: path.stat().st_mtime_ns,
             reverse=True,
         )

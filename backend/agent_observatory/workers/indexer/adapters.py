@@ -1,6 +1,7 @@
 """Read-only source adapters and indexing plans."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -8,7 +9,12 @@ from typing import Any, Protocol
 
 from agent_observatory.db.models import IndexCheckpoint
 
-from .fingerprints import file_fingerprint, indexed_content_matches
+from .fingerprints import (
+    file_fingerprint,
+    indexed_content_matches,
+    sqlite_signature,
+    sqlite_signature_is_racy,
+)
 from .scanner import RolloutScanner
 from .stepcode import StepCodeImporter
 
@@ -177,17 +183,55 @@ class XDCodeJsonlSource(CodexJsonlSource):
 class StepCodeSqliteSource:
     kind = "stepcode_sqlite"
     agent = "stepcode"
+    #: Thread lists of unchanged stores are re-read at least this often.
+    _THREAD_CACHE_TTL = 3600.0
 
     def __init__(
         self, importer: StepCodeImporter, *, parser_version: str = "4"
     ) -> None:
         self.importer = importer
         self.parser_version = parser_version
+        #: store path -> (signature, cached_at, thread ids)
+        self._threads: dict[str, tuple[tuple[Any, ...], float, list[str]]] = {}
+
+    def watch_paths(self, source: SourceDescriptor) -> tuple[Path, ...]:
+        """Every file whose change can alter ``plan`` (never ``-shm``)."""
+        return (source.path, Path(f"{source.path}-wal"))
+
+    def _thread_ids(self, path: Path, now: float) -> list[str]:
+        """Thread ids of one store, re-read only when the store changed.
+
+        Listing threads opens the database, and even a read-only connection
+        rewrites the agent's ``-shm`` file; an unchanged signature means no
+        write happened, so the previous list is still exact.
+        """
+        key = str(path)
+        try:
+            signature: tuple[Any, ...] | None = sqlite_signature(path)
+        except OSError:
+            signature = None
+        cached = self._threads.get(key)
+        if (
+            signature is not None
+            and cached is not None
+            and cached[0] == signature
+            and now - cached[1] < self._THREAD_CACHE_TTL
+        ):
+            return cached[2]
+        thread_ids = list(self.importer.iter_threads(path))
+        if signature is not None and not sqlite_signature_is_racy(signature, now):
+            self._threads[key] = (signature, now, thread_ids)
+        else:
+            self._threads.pop(key, None)
+        return thread_ids
 
     def discover(self) -> list[SourceDescriptor]:
         sources: list[SourceDescriptor] = []
+        now = time.time()
+        live: set[str] = set()
         for path in self.importer.discover():
-            for thread_id in self.importer.iter_threads(path):
+            live.add(str(path))
+            for thread_id in self._thread_ids(path, now):
                 sources.append(
                     SourceDescriptor(
                         kind=self.kind,
@@ -198,6 +242,8 @@ class StepCodeSqliteSource:
                         thread_id=thread_id,
                     )
                 )
+        for gone in set(self._threads) - live:
+            del self._threads[gone]
         return sources
 
     def plan(

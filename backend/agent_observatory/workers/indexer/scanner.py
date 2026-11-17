@@ -23,6 +23,11 @@ from agent_observatory.db.models import (
     ToolCall,
 )
 from agent_observatory.workers.indexer.parser import NormalizedEvent, parse_json_line
+from agent_observatory.workers.indexer.tree_cache import (
+    cached_resolve,
+    rglob_cached,
+    ttl_memo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +61,7 @@ class RolloutScanner:
             return []
         paths = [
             path
-            for path in self.root.rglob("rollout-*.jsonl*")
+            for path in rglob_cached(self, self.root, "rollout-*.jsonl*")
             if path.is_file() and path.name.endswith((".jsonl", ".jsonl.zst"))
         ]
         return sorted(
@@ -69,10 +74,14 @@ class RolloutScanner:
         )
 
     @staticmethod
+    @ttl_memo
     def source_identity(path: Path, prefix: str = "codex") -> str:
-        """Return one stable identity for plain and compressed siblings."""
+        """Return one stable identity for plain and compressed siblings.
+
+        Memoized: discovery asks for every known rollout on every poll.
+        """
         canonical = path.with_suffix("") if path.name.endswith(".zst") else path
-        canonical = canonical.resolve()
+        canonical = cached_resolve(canonical)
         if prefix == "xdcode":
             for parent in canonical.parents:
                 if parent.name in {"sessions", "archived_sessions"}:

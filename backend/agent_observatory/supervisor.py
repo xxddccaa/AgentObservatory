@@ -759,6 +759,9 @@ def default_specs() -> dict[str, ProcessSpec]:
     backend = Path(__file__).resolve().parent.parent
     python = sys.executable
     config = settings()
+    # Few glibc malloc arenas: thread pools otherwise grow one arena per thread
+    # and keep their freed pages resident.  No measurable cost for one user.
+    env = {"MALLOC_ARENA_MAX": os.environ.get("MALLOC_ARENA_MAX", "2")}
     return {
         "api": ProcessSpec(
             "api",
@@ -773,11 +776,13 @@ def default_specs() -> dict[str, ProcessSpec]:
                 str(config.port),
             ],
             cwd=str(backend),
+            env=dict(env),
         ),
         "worker": ProcessSpec(
             "worker",
             [python, "-c", "import asyncio; from agent_observatory.cli import _run_worker; asyncio.run(_run_worker())"],
             cwd=str(backend),
+            env=dict(env),
         ),
     }
 

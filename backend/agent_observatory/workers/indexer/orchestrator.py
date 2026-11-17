@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import socket
 import time
@@ -35,16 +36,39 @@ from .adapters import (
     StepCodeSqliteSource,
 )
 from .checkpoints import CheckpointRepository
+from .fingerprints import sqlite_change_counter
 from .ingestion import EventIngestor
 from .linking import SessionLinker, has_visible_text
 from .scanner import RolloutScanner
 from .stepcode import StepCodeImporter
 from .stepgo_host import StepGoHostSource
+from .tree_cache import cached_resolve, scan_mode
 
 
 def _elapsed_ms(started: float) -> float:
     """Milliseconds since ``started`` (``time.perf_counter``), rounded to 0.1ms."""
     return round((time.perf_counter() - started) * 1000, 1)
+
+
+def _row_key(row: Any) -> tuple[Any, ...] | None:
+    """Everything a stored checkpoint / StepGo run contributes to ``plan``."""
+    if row is None:
+        return None
+    return (
+        *(
+            getattr(row, name, None)
+            for name in (
+                "parser_version",
+                "status",
+                "index_status",
+                "file_size",
+                "file_mtime_ns",
+                "last_indexed_offset",
+            )
+        ),
+        json.dumps(getattr(row, "fingerprint_json", None), sort_keys=True, default=str),
+        json.dumps(getattr(row, "cursor_json", None), sort_keys=True, default=str),
+    )
 
 
 @dataclass(slots=True)
@@ -122,32 +146,58 @@ class IndexerOrchestrator:
         #: Extra heartbeat metadata contributed by sibling tasks (local scan, …).
         self.aux_metadata: dict[str, Any] = {}
         self._heartbeat_lock = asyncio.Lock()
+        #: identity -> (change signature, checkpoint key, settled_at) for
+        #: sources whose last plan was UNCHANGED; see :meth:`_plan_sources`.
+        self._settled: dict[str, tuple[tuple[Any, ...], tuple[Any, ...] | None, float]] = {}
+        #: Last maintenance pass repaired something, so more may be queued.
+        self._maintenance_pending = True
+        #: Whether the database already shows this worker as ``running``.
+        self._published_running = False
+        self._last_success_at: datetime | None = None
+        self._agents_probe: tuple[float, list[str]] | None = None
 
     #: Bounded per-cycle maintenance so a large backlog can never stall polling.
     _MAINTENANCE_BATCH = 200
+    #: The worker loop runs a full cycle at least this often; see ``scan_once``.
+    FULL_CYCLE_INTERVAL = 60.0
+    #: Settled sources are re-planned from scratch at least this often.
+    _SETTLED_TTL = 3600.0
+    #: A file modified this recently may still change within the same mtime
+    #: tick, so its signature is not trusted until it is older.
+    _RACY_WINDOW = 2.0
+    _AGENT_PROBE_INTERVAL = 60.0
 
-    async def scan_once(self) -> int:
+    async def scan_once(self, *, full: bool = True) -> int:
         """Run one planning + ingest cycle over every registered source.
 
         The cycle is split into a cheap **planning pass** (discover, one
         checkpoint query per chunk, ``stat`` fingerprints) and an **ingest
-        pass** that only touches sources whose metadata changed.  Unchanged
-        sources cost one dictionary lookup, so the loop no longer serializes a
-        database round trip and a commit per source per poll.
+        pass** that only touches sources whose metadata changed.
+
+        ``full=False`` is the worker loop's 2 s fast cycle.  It stats every
+        known source and the directories where new ones appear, but a source
+        whose files are unchanged since it last planned as UNCHANGED costs no
+        database query, no SQLite open and no ``resolve``; an idle fast cycle
+        opens no database session at all.  Maintenance and the heartbeat
+        write only run when something happened.  A full cycle (the default,
+        and every :attr:`FULL_CYCLE_INTERVAL` in the loop) re-validates every
+        directory and every checkpoint, so changes made behind the indexer's
+        back (a purged checkpoint, a cleared title) are still repaired.
         """
         cycle = CycleStats()
         self.last_cycle = cycle
         self.last_error = None
         started = time.perf_counter()
 
-        pairs, duplicates = await self._collect_sources()
+        with scan_mode(full=full):
+            pairs, duplicates = await self._collect_sources()
         cycle.discovered = len(pairs)
         cycle.duplicates_skipped = duplicates
         self.active_sessions = len(pairs)
         cycle.discover_ms = _elapsed_ms(started)
 
         plan_started = time.perf_counter()
-        to_index, plan_failures, unchanged = await self._plan_sources(pairs)
+        to_index, plan_failures, unchanged = await self._plan_sources(pairs, full=full)
         cycle.changed = len(to_index)
         cycle.unchanged = unchanged
         cycle.plan_ms = _elapsed_ms(plan_started)
@@ -168,13 +218,23 @@ class IndexerOrchestrator:
             await self._record_failure(source, exc)
             cycle.failures += 1
 
-        maintain_started = time.perf_counter()
-        cycle.maintenance = await self._maintain()
-        cycle.maintain_ms = _elapsed_ms(maintain_started)
+        if full or indexed or self._maintenance_pending:
+            maintain_started = time.perf_counter()
+            cycle.maintenance = await self._maintain()
+            cycle.maintain_ms = _elapsed_ms(maintain_started)
+            self._maintenance_pending = any(
+                count for key, count in cycle.maintenance.items() if key != "errors"
+            )
 
         cycle.cycle_ms = _elapsed_ms(started)
         cycle.finished = True
-        await self.heartbeat(success=self.last_error is None)
+        success = self.last_error is None
+        if success:
+            self._last_success_at = datetime.now(UTC)
+        # An idle fast cycle has nothing new to say; the heartbeat loop keeps
+        # liveness, the latest success time and these cycle stats current.
+        if full or indexed or cycle.failures or not success or not self._published_running:
+            await self.heartbeat(success=success)
         return indexed
 
     async def _collect_sources(
@@ -189,7 +249,7 @@ class IndexerOrchestrator:
             for source in await self._safe_discover(adapter, adapter.kind):
                 canonical = source.path.with_suffix("") if source.compression == "zstd" else source.path
                 family = "codex_jsonl" if source.kind in {"codex_jsonl", "xdcode_jsonl"} else source.kind
-                file_key = (family, str(canonical.resolve()))
+                file_key = (family, str(cached_resolve(canonical)))
                 duplicate_file = source.format == "jsonl" and file_key in seen_files
                 if source.identity in seen or duplicate_file:
                     duplicates += 1
@@ -200,8 +260,36 @@ class IndexerOrchestrator:
                 pairs.append((adapter, source))
         return pairs, duplicates
 
+    def _signature(
+        self, adapter: SourceAdapter, source: SourceDescriptor, now: float
+    ) -> tuple[tuple[Any, ...] | None, bool]:
+        """Cheap change signature of every file ``plan`` reads, and whether
+        one of them was modified too recently to be trusted (racy)."""
+        watch = getattr(adapter, "watch_paths", None)
+        paths = watch(source) if watch is not None else (source.path,)
+        parts: list[Any] = []
+        racy = False
+        for index, path in enumerate(paths):
+            try:
+                stat = os.stat(path)
+            except FileNotFoundError:
+                if index == 0:
+                    return None, False
+                parts.append(None)
+                continue
+            except OSError:
+                return None, False
+            parts.append((stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev))
+            racy = racy or abs(now - stat.st_mtime_ns / 1e9) < self._RACY_WINDOW
+        if source.format == "sqlite":
+            parts.append(sqlite_change_counter(source.path))
+        return tuple(parts), racy
+
     async def _plan_sources(
-        self, pairs: list[tuple[SourceAdapter, SourceDescriptor]]
+        self,
+        pairs: list[tuple[SourceAdapter, SourceDescriptor]],
+        *,
+        full: bool = True,
     ) -> tuple[
         list[tuple[SourceAdapter, SourceDescriptor, SourcePlan]],
         list[tuple[SourceDescriptor, BaseException]],
@@ -212,45 +300,96 @@ class IndexerOrchestrator:
         Checkpoints are fetched in chunks and the stat-only ``plan`` call runs
         while those rows are still attached, so planning never triggers a
         query per source.
+
+        A source that planned UNCHANGED is *settled* with its file signature
+        and checkpoint key.  ``plan`` is a function of exactly those inputs,
+        so while both are unchanged the answer is still UNCHANGED: fast cycles
+        compare the signature alone (only this worker writes checkpoints),
+        full cycles also re-read the checkpoint.  Signatures of files touched
+        within :attr:`_RACY_WINDOW` are never settled, and settled sources
+        are re-planned every :attr:`_SETTLED_TTL` regardless.
         """
         to_index: list[tuple[SourceAdapter, SourceDescriptor, SourcePlan]] = []
         failures: list[tuple[SourceDescriptor, BaseException]] = []
         unchanged = 0
+        now = time.time()
+        candidates: list[
+            tuple[SourceAdapter, SourceDescriptor, tuple[Any, ...] | None, bool]
+        ] = []
+        for adapter, source in pairs:
+            signature, racy = self._signature(adapter, source, now)
+            settled = self._settled.get(source.identity)
+            if (
+                not full
+                and signature is not None
+                and settled is not None
+                and settled[0] == signature
+                and now - settled[2] < self._SETTLED_TTL
+            ):
+                unchanged += 1
+                continue
+            candidates.append((adapter, source, signature, racy))
+        if full:
+            live = {source.identity for _, source in pairs}
+            for identity in list(self._settled):
+                if identity not in live:
+                    del self._settled[identity]
+        if not candidates:
+            return to_index, failures, unchanged
         async with self.factory() as db:
             checkpoints = await self.checkpoints.get_many(
-                db, [source.identity for _, source in pairs]
+                db, [source.identity for _, source, _, _ in candidates]
             )
-            host_pairs = [
-                (adapter, source)
-                for adapter, source in pairs
+            host_identities = [
+                source.identity
+                for adapter, source, _, _ in candidates
                 if isinstance(adapter, StepGoHostSource)
             ]
             host_runs: dict[str, StepGoRun] = {}
-            if host_pairs:
+            if host_identities:
                 rows = await db.scalars(
                     select(StepGoRun).where(
-                        StepGoRun.source_identity.in_(
-                            [source.identity for _, source in host_pairs]
-                        )
+                        StepGoRun.source_identity.in_(host_identities)
                     )
                 )
                 host_runs = {
                     row.source_identity: row for row in rows.all()
                 }
-            for adapter, source in pairs:
+            for adapter, source, signature, racy in candidates:
+                is_host = isinstance(adapter, StepGoHostSource)
+                row: Any = (
+                    host_runs.get(source.identity)
+                    if is_host
+                    else checkpoints.get(source.identity)
+                )
+                row_key = _row_key(row)
+                settled = self._settled.get(source.identity)
+                if (
+                    signature is not None
+                    and settled is not None
+                    and settled[0] == signature
+                    and settled[1] == row_key
+                    and now - settled[2] < self._SETTLED_TTL
+                ):
+                    unchanged += 1
+                    continue
                 try:
-                    if isinstance(adapter, StepGoHostSource):
-                        plan = adapter.plan_for_run(
-                            source, host_runs.get(source.identity)
-                        )
+                    if is_host:
+                        plan = adapter.plan_for_run(source, row)  # type: ignore[attr-defined]
                     else:
-                        plan = adapter.plan(source, checkpoints.get(source.identity))
+                        plan = adapter.plan(source, row)
                 except Exception as exc:  # noqa: BLE001 - isolate one source
+                    self._settled.pop(source.identity, None)
                     failures.append((source, exc))
                     continue
                 if plan.action is PlanAction.UNCHANGED:
                     unchanged += 1
+                    if signature is not None and not racy:
+                        self._settled[source.identity] = (signature, row_key, now)
+                    else:
+                        self._settled.pop(source.identity, None)
                     continue
+                self._settled.pop(source.identity, None)
                 to_index.append((adapter, source, plan))
         return to_index, failures, unchanged
 
@@ -787,14 +926,25 @@ class IndexerOrchestrator:
             error_message=session.last_error,
         )
 
+    def _detected_agents(self) -> list[str]:
+        """Agent-root probe for the heartbeat, refreshed once a minute."""
+        now = time.monotonic()
+        if (
+            self._agents_probe is None
+            or now - self._agents_probe[0] >= self._AGENT_PROBE_INTERVAL
+        ):
+            self._agents_probe = (
+                now,
+                discovery.detected_agents(layouts=settings().discovery_roots),
+            )
+        return list(self._agents_probe[1])
+
     async def heartbeat(self, *, success: bool | None = None) -> None:
         async with self._heartbeat_lock, self.factory() as db:
             now = datetime.now(UTC)
             metadata = {
                 "sessions_root": str(self.scanner.root),
-                "detected_agents": discovery.detected_agents(
-                    layouts=settings().discovery_roots
-                ),
+                "detected_agents": self._detected_agents(),
                 "registered_sources": [
                     {
                         "kind": adapter.kind,
@@ -848,7 +998,14 @@ class IndexerOrchestrator:
                 row.status = "degraded"
                 row.last_error_kind = type(self.last_error).__name__[:64]
                 row.last_error = str(self.last_error)[:2000]
+            elif self._last_success_at is not None and (
+                row.last_success_at is None or row.last_success_at < self._last_success_at
+            ):
+                # Idle fast cycles skip their own heartbeat; publish when the
+                # last one succeeded from here instead.
+                row.last_success_at = self._last_success_at
             await db.commit()
+            self._published_running = row.status == "running"
 
 
 __all__ = ["IndexerOrchestrator"]

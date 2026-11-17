@@ -86,6 +86,61 @@ instead of cancelling its siblings, and a local-source failure is reported
 through `last_local_error` as a JSON-safe `{kind, message}` summary rather than
 the exception object.
 
+### Fast and full cycles
+
+The 2 s rollout poll is a *fast* cycle; every `FULL_CYCLE_INTERVAL` (60 s,
+starting with the first poll) the loop runs a *full* one. `scan_once()` called
+directly (tests, `indexer --once`) is always full. Freshness is the same in
+both: every known source file is `stat`-ed on every poll, so appends (including
+a resumed, long-idle session) are picked up within one poll.
+
+- **Discovery** goes through `tree_cache.TreeCache` instead of `Path.rglob`.
+  The cache keeps each directory's listing and re-lists a directory only when
+  its mtime changes (creating, deleting or renaming an entry always does).
+  Fast cycles `stat` only the root, directories that hold a session and their
+  ancestors, and directories modified within the last 10 minutes; every
+  directory is validated at least every 10 s and the whole tree is re-listed
+  every 10 minutes. Directory listings whose mtime is within 2 s of "now" are
+  treated as racy and re-listed on the next poll, so a change in the same
+  timestamp tick cannot hide. Before this, `~/.stepcode/codex/.tmp` (thousands
+  of scratch directories) and `~/.config/opencode/node_modules` were walked
+  every 2 s.
+- **Planning**: a source that planned UNCHANGED is *settled* with its change
+  signature (`stat` of every file `plan` reads, the SQLite header counter for
+  stores, never `-shm`) and its checkpoint key. Fast cycles skip a settled
+  source on an equal signature alone (only this worker writes checkpoints);
+  full cycles also re-read the checkpoint, so a checkpoint purged or edited
+  behind the worker is repaired within a minute. Signatures with an mtime
+  inside the racy window are never settled, and settled sources are re-planned
+  hourly. StepCode thread lists are cached by store signature the same way, so
+  an unchanged store is never opened (even read-only connections rewrite
+  `-shm`).
+- Resolved paths and rollout identities are memoized for 60 s
+  (`cached_resolve`, `ttl_memo`); resolving every path on every poll cost more
+  than the rest of the poll.
+- **Maintenance** runs on full cycles, after an ingest, and while the previous
+  pass still found work. The cycle's own **heartbeat** write is skipped when an
+  idle fast cycle has nothing new to report; the heartbeat task still writes
+  every 10 s and publishes the latest successful cycle time.
+
+An idle fast cycle therefore opens no database session and no SQLite store.
+On the reference machine (311 sources) a fast cycle takes about 6 ms of CPU and
+the worker idles at about 0.65 % CPU, down from about 5.7 %.
+
+The local-source loop applies the same idea: when the stat-only fingerprints of
+every local source equal those of the last clean pass, the poll skips the
+database entirely; a real pass still runs at least every 60 s.
+
+A fixed local SQLite source is skipped without being opened while its
+fingerprint (main file stat, header change counter and `-wal` stat) is
+unchanged; the `-shm` wal-index is deliberately excluded because every reader,
+including our own read-only connection, rewrites it. Any write lands in the
+main file or the WAL, so new data is still picked up on the next poll, and
+unchanged sources are re-read hourly so the backfill window and record counts
+stay current. After a cycle that ingested something the worker runs
+`gc.collect()` and glibc `malloc_trim(0)` so a one-off backfill does not pin
+its peak RSS.
+
 Derived state is repaired conditionally instead of being recomputed every
 cycle: the maintenance pass only touches sessions with a missing workspace link
 or title, plus workspaces whose kind was never written, capped at 200 rows per

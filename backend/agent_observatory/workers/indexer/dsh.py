@@ -20,6 +20,7 @@ from agent_observatory.db.models import (
 )
 
 from .adapters import PlanAction, SourceDescriptor, SourcePlan
+from .tree_cache import cached_resolve, rglob_cached
 
 
 def _ts(value: Any) -> datetime | None:
@@ -91,7 +92,7 @@ class DshJsonlSource:
 
     @staticmethod
     def identity(path: Path) -> str:
-        return "dsh:" + hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+        return "dsh:" + hashlib.sha256(str(cached_resolve(path)).encode()).hexdigest()
 
     def discover(self) -> list[SourceDescriptor]:
         if not self.root.exists():
@@ -105,7 +106,7 @@ class DshJsonlSource:
                 agent=self.agent,
                 compression="zstd",
             )
-            for p in sorted(self.root.rglob("session.jsonl.zstd"))
+            for p in sorted(rglob_cached(self, self.root, "session.jsonl.zstd"))
             if p.is_file()
         ]
 

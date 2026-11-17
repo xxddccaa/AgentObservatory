@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_observatory.db.models import AgentEvent, AgentSession, CodexMessage
 
 from .adapters import PlanAction, SourceDescriptor, SourcePlan
+from .tree_cache import cached_resolve, rglob_cached
 
 
 def _id(prefix: str, value: str) -> str:
@@ -47,7 +48,7 @@ class GenericJsonlSource:
 
     @staticmethod
     def identity(path: Path) -> str:
-        return "generic:" + hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+        return "generic:" + hashlib.sha256(str(cached_resolve(path)).encode()).hexdigest()
 
     def discover(self) -> list[SourceDescriptor]:
         if not self.root.exists():
@@ -56,7 +57,7 @@ class GenericJsonlSource:
             SourceDescriptor(
                 kind=self.kind, identity=self.identity(p), path=p, format="jsonl", agent=self.agent
             )
-            for p in sorted(self.root.rglob("*.jsonl"))
+            for p in sorted(rglob_cached(self, self.root, "*.jsonl"))
             if p.is_file()
         ]
 

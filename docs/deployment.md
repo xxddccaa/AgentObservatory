@@ -56,6 +56,31 @@ API 与 Indexer Worker 两个子进程，不依赖 systemd / docker / Redis。
 共享仓库不要运行 `uv sync` / `npm ci`，也不要在里面创建 `.env`、运行时或测试报告。
 API 只绑定 loopback；跨机器访问通过 SSH 隧道或单独配置的安全反向代理，保留鉴权。
 
+### 低资源默认值
+
+只采用不影响使用体验的降耗手段，规则汇总在 `AGENTS.md` 的“低资源部署”一节，这里只列运维要点：
+
+| 项 | 默认 | 覆盖方式 |
+| --- | --- | --- |
+| PostgreSQL `shared_buffers` | `32MB` | `AGENT_OBS_PG_SHARED_BUFFERS` |
+| PostgreSQL `max_connections` | `100`（PostgreSQL 默认） | `AGENT_OBS_PG_MAX_CONNECTIONS` |
+| PostgreSQL `jit` | `off` | `AGENT_OBS_PG_JIT` |
+| PostgreSQL `maintenance_work_mem` | `32MB` | `AGENT_OBS_PG_MAINTENANCE_WORK_MEM` |
+| PostgreSQL `default_toast_compression` | `lz4` | `AGENT_OBS_PG_DEFAULT_TOAST_COMPRESSION` |
+| API / worker 的 glibc arena | `MALLOC_ARENA_MAX=2` | 启动 supervisor 前设置 `MALLOC_ARENA_MAX` |
+| 运行时 Python 依赖 | 不含 dev 组 | 需要测试时另建 `--prepare-only` 快照 |
+| 会话扫描 | 每 2 s 增量（只重列 mtime 变化的目录），每 60 s 完整周期 | 不可配置；见 `docs/architecture.md` |
+
+PostgreSQL 参数由 `deploy` / `up` 通过 `ALTER SYSTEM` 写入 `postgresql.auto.conf`。
+需要重启才生效的参数只在应用已停止时重启实例：`deploy` 在 CLI `down` 和备份之后，
+`up` 仅在 supervisor 未运行时；`--prepare-only` 只做 reload。核对实际值：
+
+```bash
+runuser -u postgres -- /usr/lib/postgresql/16/bin/psql -X -qAt \
+  -h /root/.agent-observatory/postgresql/run -p 55433 -d postgres \
+  -c 'show shared_buffers' -c 'show max_connections' -c 'show jit'
+```
+
 以下为通用开发参考；所有安装、构建和运行步骤应在**本机源码副本**内进行。
 
 ## 1. 依赖
@@ -171,6 +196,7 @@ cd backend
 
 - supervisor 常驻，`run/supervisor.pid` 记录 PID 与启动令牌（防 PID 复用误杀）。
 - 子进程 api：`python -m uvicorn agent_observatory.main:app --host <HOST> --port <PORT>`。
+  api 与 worker 都以 `MALLOC_ARENA_MAX=2` 启动。
 - 子进程 worker：`agent_observatory.cli._run_worker`，内部为 IndexerWorker。
 - 子进程异常退出后按退避自动重启；`CRASH_WINDOW=120s` 内失败 `CRASH_LIMIT=5` 次会
   进入 `crash-loop` 状态并停止重启，需人工介入（看日志 → 修复 → `restart`）。

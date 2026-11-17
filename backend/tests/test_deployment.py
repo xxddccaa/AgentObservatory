@@ -95,3 +95,41 @@ def test_e2e_refuses_non_ci_before_running_migrations(tmp_path):
     assert result.returncode == 1
     assert "refusing E2E migrations" in result.stderr
     assert not marker.exists()
+
+
+def test_postgres_profile_defaults_overrides_and_validation():
+    deploy = deploy_module()
+    defaults = deploy.postgres_settings({})
+    assert defaults == {
+        "shared_buffers": "32MB",
+        "max_connections": "100",
+        "jit": "off",
+        "maintenance_work_mem": "32MB",
+        "default_toast_compression": "lz4",
+    }
+    roomy = deploy.postgres_settings({"AGENT_OBS_PG_SHARED_BUFFERS": "128MB"})
+    assert roomy["shared_buffers"] == "128MB"
+    assert roomy["jit"] == "off"
+    with pytest.raises(ValueError, match="AGENT_OBS_PG_JIT"):
+        deploy.postgres_settings({"AGENT_OBS_PG_JIT": "off'; DROP TABLE users; --"})
+
+
+def test_tune_postgresql_applies_profile_and_reports_restart(monkeypatch, tmp_path):
+    deploy = deploy_module()
+    inputs: list[str] = []
+
+    def fake_run(command, *, input_text=None, capture=False, **_kwargs):
+        assert command[:4] == ["runuser", "-u", "postgres", "--"]
+        inputs.append(input_text or "")
+        return "t" if "bool_or" in (input_text or "") else ""
+
+    monkeypatch.setattr(deploy, "run", fake_run)
+    config = {
+        "AGENT_OBS_DATABASE_URL": "postgresql+asyncpg://observatory:secret@127.0.0.1:55433/agent_observatory"
+    }
+    assert deploy.tune_postgresql(tmp_path, config, Path("/pg/bin")) is True
+    assert "ALTER SYSTEM SET shared_buffers = '32MB';" in inputs[0]
+    assert "ALTER SYSTEM SET default_toast_compression = 'lz4';" in inputs[0]
+    assert "pg_reload_conf()" in inputs[0]
+    assert "('max_connections', '100')" in inputs[1]
+    assert "secret" not in "".join(inputs)
