@@ -10,40 +10,22 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import (
-    ActivitySpan,
     AgentEvent,
     AgentSession,
     AgentTurn,
     CodexMessage,
-    ToolCall,
 )
 
-from .adapters import PlanAction, SourceDescriptor, SourcePlan
-
-
-def _id(prefix: str, value: str) -> str:
-    return hashlib.sha256(f"{prefix}:{value}".encode()).hexdigest()[:48]
-
-
-def _ts(value: object) -> datetime | None:
-    if value is None:
-        return None
-    try:
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(
-                value / 1000 if value > 1e11 else value, tz=UTC
-            )
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError, OverflowError, OSError):
-        return None
+from .base import PlanAction, SourceDescriptor, SourcePlan
+from .common import MAX_LINE_BYTES, clear_session_rows, parse_ts, stable_id
 
 
 def _text(value: object) -> str:
@@ -141,12 +123,12 @@ class StepCliNativeSource:
             return
         with path.open("rb") as handle:
             line_number = 0
-            while raw := handle.readline(8 * 1024 * 1024 + 1):
+            while raw := handle.readline(MAX_LINE_BYTES + 1):
                 offset = handle.tell() - len(raw)
                 line_number += 1
-                if len(raw) > 8 * 1024 * 1024 and not raw.endswith(b"\n"):
+                if len(raw) > MAX_LINE_BYTES and not raw.endswith(b"\n"):
                     while raw and not raw.endswith(b"\n"):
-                        raw = handle.readline(8 * 1024 * 1024 + 1)
+                        raw = handle.readline(MAX_LINE_BYTES + 1)
                     obj: dict[str, Any] = {
                         "kind": "parse_error",
                         "error": "line_too_large",
@@ -183,7 +165,7 @@ class StepCliNativeSource:
         workspace = snapshot.get("workspaceRoot")
         model = snapshot.get("model")
         provider = snapshot.get("provider")
-        saved_at = _ts(snapshot.get("savedAt"))
+        saved_at = parse_ts(snapshot.get("savedAt"))
         session = await db.scalar(
             select(AgentSession).where(
                 AgentSession.source_identity == source.identity
@@ -191,7 +173,7 @@ class StepCliNativeSource:
         )
         if session is None:
             session = AgentSession(
-                id=_id("session", source.identity),
+                id=stable_id("session", source.identity),
                 thread_id=session_id,
                 rollout_path=str(session_dir),
                 rollout_real_path=f"stepcli:{session_dir.resolve()}",
@@ -232,7 +214,7 @@ class StepCliNativeSource:
             kind = str(raw.get("kind") or raw.get("type") or "unknown")
             payload = raw.get("payload")
             payload = payload if isinstance(payload, dict) else {}
-            timestamp = _ts(raw.get("recordedAt") or raw.get("timestamp") or raw.get("ts"))
+            timestamp = parse_ts(raw.get("recordedAt") or raw.get("timestamp") or raw.get("ts"))
             last_timestamp = timestamp or last_timestamp
             event = AgentEvent(
                 agent_session_id=session.id,
@@ -284,7 +266,7 @@ class StepCliNativeSource:
         for sequence, (role, text, timestamp, event_id) in enumerate(messages):
             if role == "user":
                 turn_index = session.turn_count or 0
-                turn_id = _id("turn", f"{session.id}:{turn_index}")
+                turn_id = stable_id("turn", f"{session.id}:{turn_index}")
                 current_turn = AgentTurn(
                     id=turn_id,
                     agent=self.agent,
@@ -299,7 +281,7 @@ class StepCliNativeSource:
                 session.turn_count = turn_index + 1
                 first_user = first_user or text
             message = CodexMessage(
-                id=_id("message", f"{session.id}:{sequence}"),
+                id=stable_id("message", f"{session.id}:{sequence}"),
                 agent_session_id=session.id,
                 event_id=event_id,
                 turn_id=current_turn.id if current_turn else None,
@@ -337,8 +319,7 @@ class StepCliNativeSource:
 
     @staticmethod
     async def _clear(db: AsyncSession, session_id: str) -> None:
-        for model in (ActivitySpan, CodexMessage, ToolCall, AgentTurn, AgentEvent):
-            await db.execute(delete(model).where(model.agent_session_id == session_id))
+        await clear_session_rows(db, session_id)
 
 
 __all__ = ["StepCliNativeSource"]

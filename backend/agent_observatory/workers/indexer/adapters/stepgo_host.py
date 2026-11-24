@@ -18,8 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import AgentSession, StepGoRun, StepGoRunEvent
 
-from .adapters import PlanAction, SourceDescriptor, SourcePlan
-from .fingerprints import file_fingerprint, indexed_content_matches
+from ..fingerprints import file_fingerprint, indexed_content_matches
+from .base import PlanAction, SourceDescriptor, SourcePlan
+from .common import as_int, stable_id
 from .pi_parser import iter_records
 
 _KNOWN_HOST_EVENTS = {
@@ -47,17 +48,6 @@ _TRANSCRIPT_KEYS = {
     "rolloutpath",
     "rollout_path",
 }
-
-
-def _id(prefix: str, value: str) -> str:
-    return hashlib.sha256(f"{prefix}:{value}".encode()).hexdigest()[:48]
-
-
-def _as_int(value: Any) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _nested_payload(raw: dict[str, Any]) -> list[dict[str, Any]]:
@@ -182,7 +172,7 @@ class StepGoHostSource:
         )
         if run is None:
             run = StepGoRun(
-                id=_id("stepgo-run", source.identity),
+                id=stable_id("stepgo-run", source.identity),
                 host_run_id=source.path.stem,
                 source_identity=source.identity,
                 source_path=real_path,
@@ -248,8 +238,8 @@ class StepGoHostSource:
 
         for record in iter_records(
             source.path,
-            offset=_as_int(run.last_indexed_offset),
-            line_offset=_as_int(run.last_indexed_line),
+            offset=as_int(run.last_indexed_offset),
+            line_offset=as_int(run.last_indexed_line),
         ):
             raw = record.raw_json
             event_type = record.record_type
@@ -287,9 +277,9 @@ class StepGoHostSource:
                 run.raw_end_json = raw
                 data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
                 if data.get("exitCode") is not None:
-                    run.exit_code = _as_int(data.get("exitCode"))
+                    run.exit_code = as_int(data.get("exitCode"), non_negative=False)
                 elif data.get("exit_code") is not None:
-                    run.exit_code = _as_int(data.get("exit_code"))
+                    run.exit_code = as_int(data.get("exit_code"), non_negative=False)
                 if isinstance(data.get("metrics"), dict):
                     run.metrics_json = data["metrics"]
                 if run.exit_code not in (None, 0):

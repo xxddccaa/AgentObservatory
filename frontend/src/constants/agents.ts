@@ -9,6 +9,8 @@ export const AGENT_OPTIONS = [
   { value: "pi", label: "Pi" },
   { value: "xdcode", label: "XDCode" },
   { value: "stepgo", label: "StepGo" },
+  { value: "agy", label: "AGY" },
+  { value: "gemini", label: "Gemini CLI" },
   { value: "generic", label: "Generic" },
 ] as const;
 

@@ -1,12 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { VIEWER, login } from "./util";
-
-test.beforeEach(async ({ page }) => {
-  await page.context().clearCookies();
-});
+import { openDashboard } from "./util";
 
 test("storage catalogues local data and previews without deleting", async ({ page }) => {
-  await login(page);
+  await openDashboard(page);
   await page.goto("/storage");
 
   await expect(page.getByRole("heading", { name: "Storage" })).toBeVisible();
@@ -25,11 +21,4 @@ test("storage catalogues local data and previews without deleting", async ({ pag
   await expect(emptyPlan.or(deleteButton).first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "最近的清理记录" })).toBeVisible();
   await expect(page.getByText("还没有执行过清理。")).toBeVisible();
-});
-
-test("viewers cannot reach the storage page", async ({ page }) => {
-  await login(page, VIEWER);
-  await page.goto("/storage");
-  await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 });

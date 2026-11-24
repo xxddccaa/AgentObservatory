@@ -2,7 +2,7 @@
 
 本文件是 AI 代理进入本仓库后的第一份说明。
 
-Agent Observatory 是一个**本地优先、只读、可审计、多用户**的多 agent 会话观测台。
+Agent Observatory 是一个**本地优先、只读、可审计、单人使用（无登录）**的多 agent 会话观测台。
 
 它统一索引本机各 coding agent 的历史会话：
 
@@ -10,8 +10,9 @@ Agent Observatory 是一个**本地优先、只读、可审计、多用户**的�
    数据，把事件结构化成消息 / turn / 工具调用 / Token，并保留完整原始事件。
 2. **自主发现与统一模型** —— `agent` 与 `source_kind` 解耦，通过适配器注册表发现、
    规划、增量索引和断点续扫。
-3. **审计与权限** —— PostgreSQL 作为唯一持久化事实来源；所有用户与系统动作写审计
-   日志，按 admin / operator / viewer 三角色强制鉴权。
+3. **审计与访问控制** —— PostgreSQL 作为唯一持久化事实来源；所有用户与系统动作写审计
+   日志（操作者记为 `local` / `system`）。没有账号、登录、角色或 API token：访问控制靠
+   监听地址（默认 `127.0.0.1`）加 Host 白名单（防 DNS rebinding）和写请求同源检查（防 CSRF）。
 
 本项目不提供终端交互、任务编排、watchdog 或自动重试。
 
@@ -22,30 +23,32 @@ Agent Observatory 是一个**本地优先、只读、可审计、多用户**的�
 
 - 本机部署根为 `/root/.agent-observatory/`；不得把数据库、依赖、构建产物、缓存、日志、
   导出、截图或备份放进共享仓库，即使这些文件已经被 `.gitignore` 忽略。
-- **所有机器使用相同的应用管理员账号和密码**：用户名固定为 `admin`，密码使用用户已指定的
-  同一份统一管理员密码；不得在新机器上随机生成不同的管理员密码，也不得擅自改成示例密码。
-- `config.env` 是本机配置（权限 `600`），`credentials.env` 保存本机管理员凭据（权限 `600`）。
-  各机器分别保存一份相同的管理员登录凭据，**不要将真实密码写入共享仓库或文档**。
-- 新机器首次部署前，应通过用户认可的私密渠道同步已有机器的管理员 `credentials.env`，
-  或由用户提供同一个 `AGENT_OBS_ADMIN_PASSWORD`；缺少统一凭据时先向用户索取，不自行设定新密码。
-  只同步管理员登录凭据，不复制其他机器的 `config.env`、数据库、运行目录或 agent 原始数据。
-- 已有管理员账号的机器先用统一凭据验证登录；如密码不一致，通过有审计记录的
-  `./manage.sh passwd admin` 对齐，不直接修改用户表。正常更新部署不得反复重置密码。
+- **没有登录**：2026-11-24 起删除了账号 / 密码 / 角色 / API token（迁移 `0016_drop_accounts`
+  删表），部署不再需要管理员密码，也不再有 `credentials.env` 和 `passwd`。不要重新引入登录。
+- `config.env` 是本机配置（权限 `600`），含随机数据库密码和签名密钥
+  `AGENT_OBS_SIGNING_SECRET`（旧机器上的 `AGENT_OBS_API_TOKEN_SECRET` 同样有效），
+  **不要写入共享仓库或文档**；不要复制其他机器的 `config.env`、数据库、运行目录或 agent 原始数据。
 - `releases/<版本>/` 是包含当前工作区改动的本机源码快照，依赖与前端构建也只在快照内产生；
   `current` 指向当前运行版本。服务不得通过 editable install 或 `PYTHONPATH` 导入共享源码。
 - 独立 PostgreSQL 16 的数据位于 `/root/.agent-observatory/postgresql/data/`，默认仅监听
   `127.0.0.1:55433`。数据库为 `agent_observatory`，自动化测试只用 `agent_observatory_ci`，
   角色为 `observatory`，随机数据库密码只存本机配置。
-  管理员登录密码统一不代表数据库密码或签名密钥统一；后两者必须保持每台机器独立。
+  数据库密码和签名密钥每台机器独立。
 - 不要搬动、停止或修改机器上服务其他项目的 PostgreSQL（通常在 `5432`）。首次迁移旧实例时，
   先通过原数据库配置调用 CLI `down`，再备份、恢复到独立库，核对数据量后切换；保留旧库和备份。
 - PostgreSQL 必须由 `postgres` 用户运行；部署脚本只用 ACL 为它授予 `/root` 及应用目录的
   必要遍历权限，不要把 `/root` 改成所有用户可读，也不要用 root 启动 PostgreSQL。
 - `./manage.sh deploy` 部署当前共享源码；`./manage.sh up` 启动已部署的本机快照（包括本机数据库）；
-  `status / down / restart / logs / passwd / doctor` 操作本机实例。
-- API 默认仅监听 `127.0.0.1:8125`。跨机器访问使用 SSH 隧道；不要因为是单人使用就取消鉴权或公网暴露。
+  `status / down / restart / logs / doctor` 操作本机实例。
+- API 默认仅监听 `127.0.0.1:8125`，只接受 `127.0.0.1` / `localhost` / `::1` 的 Host，写请求必须同源。
+  用户明确要求时可监听 `0.0.0.0`（首次部署 `AGENT_OBS_HOST=0.0.0.0 ./manage.sh deploy`，或改本机
+  `config.env` 后 `./manage.sh restart`）；此时同一网络内任何人都能读取全部会话，不要擅自开启或暴露公网。
+  经反向代理 / 自定义域名访问时用 `AGENT_OBS_ALLOWED_HOSTS` 追加 Host。
 - 新接入的 agent 原始目录始终只读；本机默认 `AGENT_OBS_RETENTION_ENABLED=false`。
 - 部署失败保留原运行版本与备份；不要自动降级数据库或清空历史，也不要创建 commit 或强制推送。
+- **macOS 工作站（无 root）**：`deploy.py` 自动切换到 user 档案，部署根为
+  `~/.agent-observatory/`，独立 PostgreSQL 使用 Homebrew 的 16 或更新版本、以当前用户运行，
+  仍只监听 `127.0.0.1:55433`；不需要 `runuser` / `setfacl`。其余约定（快照、备份、只读 agent 目录）不变。
 - 详细操作和验证见 `docs/deployment.md`。
 
 ### 低资源部署（小内存机器同样适用）
@@ -103,8 +106,8 @@ Agent Observatory 是一个**本地优先、只读、可审计、多用户**的�
 4. **不要提交** token、密码、数据库 dump、任务输出、运行日志、终端截图、浏览器截图。
 5. **不要修改或删除**各 agent 原始数据目录下的文件，包括 `~/.codex`、
    `~/.stepcode`、`~/.step-cli`、`~/.claude`、`~/.dsh`、
-   `~/.local/share/opencode`、`~/.config/opencode`、`~/.pi`、`~/.xdcode`
-   和 `~/.stepgo`。应用只做读取、解析、索引、监听、展示、导出副本；
+   `~/.local/share/opencode`、`~/.config/opencode`、`~/.pi`、`~/.xdcode`、
+   `~/.stepgo`、`~/.gemini/antigravity-cli`（agy）和 `~/.gemini`（gemini）。应用只做读取、解析、索引、监听、展示、导出副本；
    Storage 的显式清理流程除外。
 6. **PostgreSQL 是唯一持久化事实来源**，保存历史、审计、系统命令和索引断点。
 7. **所有用户和系统控制动作都必须写 `audit_logs`**。

@@ -1,5 +1,4 @@
 import { createApp, defineComponent, nextTick } from "vue";
-import { createPinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -59,7 +58,6 @@ async function mountAt(component: object, path: string) {
   await router.push(path);
   await router.isReady();
   const app = createApp(component);
-  app.use(createPinia());
   app.use(router);
   app.mount(root);
   await flush();
@@ -232,8 +230,12 @@ describe("multi-agent filters and labels", () => {
     const select = mounted.root.querySelector<HTMLSelectElement>(
       'select[aria-label="Filter sessions by agent"]'
     );
-    expect(select?.querySelectorAll("option")).toHaveLength(11);
+    expect(select?.querySelectorAll("option")).toHaveLength(13);
     expect(mounted.root.textContent).toContain("StepCode");
+    const agy = select!.querySelector<HTMLOptionElement>('option[value="agy"]');
+    expect(agy?.textContent).toBe("AGY");
+    const gemini = select!.querySelector<HTMLOptionElement>('option[value="gemini"]');
+    expect(gemini?.textContent).toBe("Gemini CLI");
 
     select!.value = "claude";
     select!.dispatchEvent(new Event("change"));
@@ -330,7 +332,7 @@ describe("multi-agent filters and labels", () => {
     const select = mounted.root.querySelector<HTMLSelectElement>(
       'select[aria-label="Filter insights by agent"]'
     );
-    expect(select?.querySelectorAll("option")).toHaveLength(11);
+    expect(select?.querySelectorAll("option")).toHaveLength(13);
     expect(mounted.root.textContent).toContain("Cross-agent comparison");
     expect(mounted.root.textContent).toContain("Codex");
     expect(mounted.root.textContent).toContain("Claude");

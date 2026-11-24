@@ -1,9 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { login } from "./util";
+import { openDashboard } from "./util";
 
 test.beforeEach(async ({ page }) => {
-  await page.context().clearCookies();
-  await login(page);
+  await openDashboard(page);
 });
 
 test("dashboard shows real data, not scaffold placeholders", async ({ page }) => {
@@ -239,14 +238,7 @@ test("history groups default closed and remember expanded workspaces", async ({ 
   await expect(page.locator(".group-rows").first()).toBeVisible();
 });
 
-test("settings exposes profile, tokens, and admin users", async ({ page }) => {
-  await page.goto("/settings");
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Users" })).toBeVisible();
-});
-
-test("admin can inspect system status and sanitized logs", async ({ page }) => {
+test("system status and sanitized logs are available", async ({ page }) => {
   await page.goto("/system");
   await expect(page.getByRole("heading", { name: "System" })).toBeVisible();
   await expect(page.getByText("Overall status")).toBeVisible();

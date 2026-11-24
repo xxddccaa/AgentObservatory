@@ -3,11 +3,18 @@
 from . import discovery
 from .adapters import (
     CodexJsonlSource,
+    GeminiCliSource,
+    PiJsonlSource,
     PlanAction,
     SourceAdapter,
     SourceDescriptor,
     SourcePlan,
+    StepCliNativeSource,
+    StepCodeImporter,
+    StepCodeItem,
     StepCodeSqliteSource,
+    StepCodeTurn,
+    StepGoHostSource,
     XDCodeJsonlSource,
 )
 from .checkpoints import CheckpointRepository
@@ -17,12 +24,8 @@ from .local_sources import LocalInsightsIndexer
 from .manager import IndexerWorker
 from .orchestrator import IndexerOrchestrator
 from .parser import NormalizedEvent, parse_json_line
-from .pi import PiJsonlSource
 from .registry import build_registry
 from .scanner import RolloutScanner
-from .stepcli import StepCliNativeSource
-from .stepcode import StepCodeImporter, StepCodeItem, StepCodeTurn
-from .stepgo_host import StepGoHostSource
 
 __all__ = [
     "IndexerWorker",
@@ -30,6 +33,7 @@ __all__ = [
     "CheckpointRepository",
     "CodexJsonlSource",
     "EventIngestor",
+    "GeminiCliSource",
     "NormalizedEvent",
     "PlanAction",
     "PiJsonlSource",

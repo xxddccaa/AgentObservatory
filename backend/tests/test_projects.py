@@ -248,7 +248,7 @@ async def test_project_detail_and_timeseries_windows(db_session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_projects_api_and_history_workspace_filter(
-    client, as_viewer, db_session: AsyncSession
+    client, db_session: AsyncSession
 ):
     db_session.add_all(
         [

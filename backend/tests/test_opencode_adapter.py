@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from agent_observatory.db.models import CodexMessage
 from agent_observatory.workers.indexer.adapters import PlanAction, SourcePlan
-from agent_observatory.workers.indexer.opencode import OpenCodeJsonSource
+from agent_observatory.workers.indexer.adapters.opencode import OpenCodeJsonSource
 
 
 def test_absent_root(tmp_path: Path):

@@ -1,4 +1,4 @@
-"""Authenticated read-only Insights API."""
+"""Read-only Insights API."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,7 +7,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from agent_observatory.api.deps import (
     DB,
-    CurrentPrincipal,
     _client_ip,
     _user_agent,
 )
@@ -48,7 +47,6 @@ def _filters(
 @router.get("/overview")
 async def get_overview(
     db: DB,
-    principal: CurrentPrincipal,
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
     workspace_id: str | None = None,
@@ -63,7 +61,6 @@ async def get_overview(
 @router.get("/timeseries")
 async def get_timeseries(
     db: DB,
-    principal: CurrentPrincipal,
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
     workspace_id: str | None = None,
@@ -78,7 +75,6 @@ async def get_timeseries(
 @router.get("/latency")
 async def get_latency(
     db: DB,
-    principal: CurrentPrincipal,
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
     workspace_id: str | None = None,
@@ -93,7 +89,6 @@ async def get_latency(
 @router.get("/tools")
 async def get_tools(
     db: DB,
-    principal: CurrentPrincipal,
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
     workspace_id: str | None = None,
@@ -113,7 +108,6 @@ async def get_tools(
 @router.get("/skills")
 async def get_skills(
     db: DB,
-    principal: CurrentPrincipal,
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
     workspace_id: str | None = None,
@@ -131,7 +125,6 @@ async def get_skills(
 @router.get("/agents")
 async def get_agents(
     db: DB,
-    principal: CurrentPrincipal,
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
     workspace_id: str | None = None,
@@ -146,7 +139,6 @@ async def get_agents(
 @router.get("/sources")
 async def get_sources(
     db: DB,
-    principal: CurrentPrincipal,
     agent: str | None = Query(None, min_length=1, max_length=32),
     source: str | None = None,
     status: str | None = None,
@@ -160,7 +152,6 @@ async def get_sources(
 async def get_session_timeline(
     session_id: str,
     db: DB,
-    principal: CurrentPrincipal,
     limit: int = Query(500, ge=1, le=2000),
 ):
     result = await service.session_timeline(db, session_id, limit=limit)
@@ -172,7 +163,6 @@ async def get_session_timeline(
 @router.get("/evidence")
 async def list_evidence(
     db: DB,
-    principal: CurrentPrincipal,
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
     source_id: str | None = None,
@@ -197,7 +187,6 @@ async def get_evidence(
     evidence_id: str,
     request: Request,
     db: DB,
-    principal: CurrentPrincipal,
 ):
     result = await service.evidence(db, evidence_id)
     if result is None:
@@ -205,7 +194,6 @@ async def get_evidence(
     await audit.record(
         db,
         action="insights.evidence.viewed",
-        actor_id=principal.user_id,
         resource_type="evidence_record",
         resource_id=evidence_id,
         request_id=getattr(request.state, "request_id", None),
@@ -220,7 +208,6 @@ async def get_evidence(
 async def export_insights(
     request: Request,
     db: DB,
-    principal: CurrentPrincipal,
     format_name: str = Query("json", alias="format"),
     from_value: str | None = Query(None, alias="from"),
     to_value: str | None = Query(None, alias="to"),
@@ -235,7 +222,6 @@ async def export_insights(
     await audit.record(
         db,
         action="insights.exported",
-        actor_id=principal.user_id,
         resource_type="insights",
         resource_id=format_name,
         request_id=getattr(request.state, "request_id", None),

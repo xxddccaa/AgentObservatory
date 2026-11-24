@@ -27,7 +27,7 @@ describe("retention API", () => {
     await getRetentionOverview(true);
     expect(fetch).toHaveBeenCalledWith(
       "/api/retention/overview?refresh=true",
-      expect.objectContaining({ credentials: "include" }),
+      expect.objectContaining({ credentials: "same-origin" }),
     );
   });
 
@@ -66,7 +66,7 @@ describe("retention API", () => {
     await listRetentionRuns(10);
     expect(fetch).toHaveBeenCalledWith(
       "/api/retention/runs?limit=10",
-      expect.objectContaining({ credentials: "include" }),
+      expect.objectContaining({ credentials: "same-origin" }),
     );
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(1024)).toBe("1.0 KB");

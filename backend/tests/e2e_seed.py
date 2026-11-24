@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from agent_observatory.config import settings
 from agent_observatory.db.models import LocalDataSource
 from agent_observatory.db.session import get_engine, reset_engine
-from agent_observatory.services import users
 from agent_observatory.workers.indexer import IndexerWorker
 
 
@@ -38,22 +37,9 @@ async def main() -> None:
                 "activity_spans, evidence_records, thread_edges, thread_goals, "
                 "local_data_sources, tool_calls, messages, agent_turns, "
                 "agent_events, index_checkpoints, retention_runs, agent_sessions, "
-                "system_commands, worker_heartbeats, workspaces, audit_logs, "
-                "api_tokens, sessions, user_roles, users "
+                "system_commands, worker_heartbeats, workspaces, audit_logs "
                 "RESTART IDENTITY CASCADE"
             )
-        )
-        await users.create_user(
-            db,
-            username="admin",
-            password="Synthetic-e2e-admin-42",
-            roles=["admin", "operator"],
-        )
-        await users.create_user(
-            db,
-            username="viewer",
-            password="viewerpass123",
-            roles=["viewer"],
         )
         await db.commit()
 

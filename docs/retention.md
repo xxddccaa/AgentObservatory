@@ -9,7 +9,7 @@ deletes anything.
 ```
 browser (/storage)
   └─ POST /api/retention/preview      # read-only: inventory + sealed plan token
-       └─ POST /api/retention/runs    # admin only: audit_logs + system_commands row
+       └─ POST /api/retention/runs    # same-origin only: audit_logs + system_commands row
             └─ Supervisor             # claims the command, applies the plan
                  ├─ deletes files older than the retention floor
                  ├─ purges matching agent_sessions / local_data_sources rows
@@ -112,8 +112,8 @@ exists will simply re-index it.
 ## Relationship to the read-only rule
 
 `AGENTS.md` describes the `.codex` tree as read-only for the application. The
-Storage feature is the one deliberate, explicitly approved exception: an
-administrator selects old data on a web page and the local Supervisor deletes
+Storage feature is the one deliberate, explicitly approved exception: the
+user selects old data on a web page and the local Supervisor deletes
 it. Everything else stays read-only. To restore a strict read-only posture for
 a specific tree, list it in `AGENT_OBS_RETENTION_PROTECTED_ROOTS` (for example
 `~/.codex/sessions`), or set `AGENT_OBS_RETENTION_ENABLED=false`.

@@ -22,13 +22,13 @@ from agent_observatory.config import settings
 from agent_observatory.db.models import LocalDataSource
 from agent_observatory.services import audit
 
+from .adapters import StepCodeImporter
 from .linking import SessionLinker
 from .local_sources import LocalInsightsIndexer
 from .memories import MemoryIndexer
 from .orchestrator import IndexerOrchestrator
 from .registry import build_registry
 from .scanner import RolloutScanner
-from .stepcode import StepCodeImporter
 
 logger = logging.getLogger(__name__)
 

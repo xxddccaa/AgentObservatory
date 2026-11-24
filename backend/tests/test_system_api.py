@@ -6,16 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 
-async def _login(client, username: str, password: str) -> None:
-    response = await client.post(
-        "/api/auth/login", json={"username": username, "password": password}
-    )
-    assert response.status_code == 200, response.text
-
-
 @pytest.mark.anyio
-async def test_system_status_and_logs_are_admin_only(
-    client, admin_user, viewer_user, tmp_path, monkeypatch
+async def test_system_status_and_logs_need_no_login(
+    client, tmp_path, monkeypatch
 ) -> None:
     from agent_observatory.api import system as system_api
 
@@ -51,11 +44,6 @@ async def test_system_status_and_logs_are_admin_only(
 
     monkeypatch.setattr(system_api, "readiness_payload", readiness)
 
-    await _login(client, viewer_user["username"], "viewer-password-123")
-    assert (await client.get("/api/system/status")).status_code == 403
-
-    client.cookies.clear()
-    await _login(client, admin_user["username"], "admin-password-123")
     status = await client.get("/api/system/status")
     assert status.status_code == 200
     assert status.json()["components"]["indexer"]["status"] == "down"
@@ -69,8 +57,7 @@ async def test_system_status_and_logs_are_admin_only(
 
 
 @pytest.mark.anyio
-async def test_system_logs_reject_invalid_cursor(client, admin_user) -> None:
-    await _login(client, admin_user["username"], "admin-password-123")
+async def test_system_logs_reject_invalid_cursor(client) -> None:
     response = await client.get("/api/system/logs?cursor=not-base64")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "bad_request"

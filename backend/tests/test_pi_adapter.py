@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from agent_observatory.db.models import AgentEvent, AgentTurn, CodexMessage, ToolCall
 from agent_observatory.workers.indexer.adapters import PlanAction
-from agent_observatory.workers.indexer.pi import PiJsonlSource
+from agent_observatory.workers.indexer.adapters.pi import PiJsonlSource
 
 
 def _write(path: Path, rows: list[dict]) -> None:
@@ -272,7 +272,7 @@ def test_pi_partial_line_is_retried(tmp_path: Path) -> None:
     _write(path, _rows()[:1])
     with path.open("a") as handle:
         handle.write('{"type":"message"')
-    from agent_observatory.workers.indexer.pi_parser import iter_records
+    from agent_observatory.workers.indexer.adapters.pi_parser import iter_records
 
     records = list(iter_records(path))
     assert len(records) == 1
@@ -281,7 +281,7 @@ def test_pi_partial_line_is_retried(tmp_path: Path) -> None:
 def test_pi_oversized_lines_have_bounded_memory(tmp_path: Path, monkeypatch) -> None:
     import tracemalloc
 
-    from agent_observatory.workers.indexer import pi_parser
+    from agent_observatory.workers.indexer.adapters import pi_parser
 
     monkeypatch.setattr(pi_parser, "_MAX_LINE_BYTES", 1024)
     path = tmp_path / "large.jsonl"

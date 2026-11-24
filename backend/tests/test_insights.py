@@ -314,16 +314,10 @@ async def _seed_insights(db: AsyncSession) -> None:
 
 
 @pytest.mark.anyio
-async def test_insights_require_authentication(client: AsyncClient) -> None:
-    response = await client.get("/api/insights/overview")
-    assert response.status_code == 401
-
-
-@pytest.mark.anyio
-async def test_viewer_can_read_zero_safe_overview(
-    as_viewer: AsyncClient,
+async def test_reads_zero_safe_overview_without_login(
+    client: AsyncClient,
 ) -> None:
-    response = await as_viewer.get(
+    response = await client.get(
         "/api/insights/overview",
         params={
             "from": "2026-01-01T00:00:00+00:00",
@@ -350,7 +344,7 @@ async def test_viewer_can_read_zero_safe_overview(
 
 @pytest.mark.anyio
 async def test_aggregates_latency_tools_skills_and_timeseries(
-    as_viewer: AsyncClient,
+    client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
     await _seed_insights(db_session)
@@ -359,7 +353,7 @@ async def test_aggregates_latency_tools_skills_and_timeseries(
         "to": NOW.isoformat(),
     }
 
-    overview = (await as_viewer.get("/api/insights/overview", params=params)).json()
+    overview = (await client.get("/api/insights/overview", params=params)).json()
     assert overview["totals"]["session_count"] == 2
     assert overview["totals"]["turn_count"] == 3
     assert overview["totals"]["total_tokens"] == 600
@@ -393,14 +387,14 @@ async def test_aggregates_latency_tools_skills_and_timeseries(
         },
     ]
     stepcode_overview = (
-        await as_viewer.get(
+        await client.get(
             "/api/insights/overview", params={**params, "agent": "stepcode"}
         )
     ).json()
     assert stepcode_overview["totals"]["turn_count"] == 1
     assert stepcode_overview["totals"]["total_tokens"] == 300
     stepgo_overview = (
-        await as_viewer.get(
+        await client.get(
             "/api/insights/overview", params={**params, "agent": "stepgo"}
         )
     ).json()
@@ -408,7 +402,7 @@ async def test_aggregates_latency_tools_skills_and_timeseries(
     assert stepgo_overview["totals"]["total_tokens"] == 0
 
     timeseries = (
-        await as_viewer.get("/api/insights/timeseries", params=params)
+        await client.get("/api/insights/timeseries", params=params)
     ).json()
     assert len(timeseries["points"]) <= 500
     assert sum(point["turn_count"] for point in timeseries["points"]) == 3
@@ -420,7 +414,7 @@ async def test_aggregates_latency_tools_skills_and_timeseries(
         "stepcode",
     }
 
-    latency = (await as_viewer.get("/api/insights/latency", params=params)).json()
+    latency = (await client.get("/api/insights/latency", params=params)).json()
     assert latency["summary"]["turn_duration_ms"] == {
         "count": 3,
         "p50": 200.0,
@@ -429,7 +423,7 @@ async def test_aggregates_latency_tools_skills_and_timeseries(
     }
     assert sum(item["count"] for item in latency["distribution"]) == 3
 
-    tools = (await as_viewer.get("/api/insights/tools", params=params)).json()
+    tools = (await client.get("/api/insights/tools", params=params)).json()
     assert tools["items"][0]["call_count"] == 2
     assert tools["items"][0]["failure_count"] == 1
     assert tools["items"][0]["p50_ms"] == pytest.approx(200.0)
@@ -440,7 +434,7 @@ async def test_aggregates_latency_tools_skills_and_timeseries(
 
 @pytest.mark.anyio
 async def test_insights_stepgo_filter_counts_native_metrics_once(
-    as_viewer: AsyncClient,
+    client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
     await _seed_insights(db_session)
@@ -466,7 +460,7 @@ async def test_insights_stepgo_filter_counts_native_metrics_once(
     }
 
     overview = (
-        await as_viewer.get(
+        await client.get(
             "/api/insights/overview", params={**params, "agent": "stepgo"}
         )
     ).json()
@@ -476,12 +470,12 @@ async def test_insights_stepgo_filter_counts_native_metrics_once(
     assert [row["agent"] for row in overview["by_agent"]] == ["codex"]
 
     all_agents = (
-        await as_viewer.get("/api/insights/overview", params=params)
+        await client.get("/api/insights/overview", params=params)
     ).json()
     assert all_agents["totals"]["session_count"] == 2
     assert all_agents["totals"]["total_tokens"] == 600
 
-    skills = (await as_viewer.get("/api/insights/skills", params=params)).json()
+    skills = (await client.get("/api/insights/skills", params=params)).json()
     assert skills["items"][0]["evidence"]["available"] == 1
     assert skills["items"][0]["evidence"]["loaded"] == 1
     assert skills["items"][0]["confidence"]["exact"] == 1
@@ -510,7 +504,7 @@ async def test_timeseries_buckets_are_utc_when_database_timezone_is_not_utc(
 
 @pytest.mark.anyio
 async def test_sources_agent_graph_and_ordered_timeline(
-    as_operator: AsyncClient,
+    client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
     await _seed_insights(db_session)
@@ -518,17 +512,17 @@ async def test_sources_agent_graph_and_ordered_timeline(
         "from": (NOW - timedelta(days=1)).isoformat(),
         "to": NOW.isoformat(),
     }
-    sources = (await as_operator.get("/api/insights/sources")).json()
+    sources = (await client.get("/api/insights/sources")).json()
     assert sources["sources"][0]["status"] == "ready"
     assert sources["sources"][0]["agent"] == "codex"
     assert (
-        await as_operator.get(
+        await client.get(
             "/api/insights/sources", params={"agent": "stepcode"}
         )
     ).json()["sources"] == []
     assert sources["sources"][0]["coverage_ended_at"] == NOW.isoformat()
 
-    graph = (await as_operator.get("/api/insights/agents", params=params)).json()
+    graph = (await client.get("/api/insights/agents", params=params)).json()
     assert {node["thread_id"] for node in graph["nodes"]} == {
         "thread-parent",
         "thread-child",
@@ -538,7 +532,7 @@ async def test_sources_agent_graph_and_ordered_timeline(
     assert child["outcome"] == "complete"
 
     timeline = (
-        await as_operator.get("/api/insights/sessions/session-parent/timeline")
+        await client.get("/api/insights/sessions/session-parent/timeline")
     ).json()
     assert timeline["session_id"] == "session-parent"
     assert [span["id"] for span in timeline["spans"]] == ["span-1", "span-2"]
@@ -547,12 +541,12 @@ async def test_sources_agent_graph_and_ordered_timeline(
 
 @pytest.mark.anyio
 async def test_evidence_and_exports_are_audited(
-    as_viewer: AsyncClient,
+    client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
     await _seed_insights(db_session)
 
-    listed = await as_viewer.get(
+    listed = await client.get(
         "/api/insights/evidence",
         params={
             "source_id": "source-1",
@@ -564,11 +558,11 @@ async def test_evidence_and_exports_are_audited(
     assert listed.json()["items"][0]["id"] == "evidence-1"
     assert "raw_json" not in listed.json()["items"][0]
 
-    evidence = await as_viewer.get("/api/insights/evidence/evidence-1")
+    evidence = await client.get("/api/insights/evidence/evidence-1")
     assert evidence.status_code == 200
     assert evidence.json()["raw_json"]["payload"]["text"] == "full evidence"
 
-    exported = await as_viewer.get(
+    exported = await client.get(
         "/api/insights/export",
         params={
             "format": "csv",
@@ -597,7 +591,7 @@ async def test_evidence_and_exports_are_audited(
         "insights.evidence.viewed",
         "insights.exported",
     ]
-    assert all(row.actor_id for row in rows)
+    assert all(row.actor_type == "local" and row.actor_id is None for row in rows)
 
 
 @pytest.mark.anyio
@@ -617,9 +611,9 @@ async def test_evidence_and_exports_are_audited(
     ],
 )
 async def test_invalid_ranges_and_formats_return_400(
-    as_admin: AsyncClient,
+    client: AsyncClient,
     path: str,
     params: dict[str, str],
 ) -> None:
-    response = await as_admin.get(path, params=params)
+    response = await client.get(path, params=params)
     assert response.status_code == 400

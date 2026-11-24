@@ -28,7 +28,7 @@
         </span>
         <span class="tile__value">{{ audit.length }}</span>
       </router-link>
-      <router-link v-if="auth.isAdmin" class="tile" to="/system">
+      <router-link class="tile" to="/system">
         <span class="tile__icon" :data-tone="health.online ? 'ok' : 'danger'"><Activity :size="17" /></span>
         <span class="tile__copy">
           <span class="tile__label">System health</span>
@@ -38,14 +38,6 @@
           {{ health.label }}
         </span>
       </router-link>
-      <div v-else class="tile">
-        <span class="tile__icon" :data-tone="health.online ? 'ok' : 'danger'"><Activity :size="17" /></span>
-        <span class="tile__copy">
-          <span class="tile__label">System health</span>
-          <span class="tile__sub">{{ healthyServices }}/2 services online</span>
-        </span>
-        <span class="tile__status" :data-tone="health.online ? 'ok' : 'danger'">{{ health.label }}</span>
-      </div>
     </div>
 
     <section class="panel">
@@ -115,12 +107,9 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "@lucide/vue";
-import { useAuthStore } from "../stores/auth";
 import { listHistory, sessionTitle, type HistorySession } from "../api/history";
 import { listAudit, type AuditItem } from "../api/audit";
 import { getReadyHealth } from "../api/health";
-
-const auth = useAuthStore();
 
 const history = ref<HistorySession[]>([]);
 const audit = ref<AuditItem[]>([]);

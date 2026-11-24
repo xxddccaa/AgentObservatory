@@ -1,7 +1,7 @@
 """Application settings from environment.
 
 Reads environment with explicit, documented aliases (see `.env.example`).
-One source of truth consumed by `db.session`, `services.auth`, workers, and
+One source of truth consumed by `db.session`, workers, and
 the CLI. Pydantic Settings validates types and fails fast on typos.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,7 +46,12 @@ class Settings(BaseSettings):
     environment: str = Field(default="development", alias="AGENT_OBS_ENVIRONMENT")
 
     # --- Hosting ---
+    # 127.0.0.1 keeps the login-free UI on this machine; 0.0.0.0 serves the
+    # network (anyone who can reach the port can read every session).
     host: str = Field(default="127.0.0.1", alias="AGENT_OBS_HOST")
+    # Extra Host header names accepted besides loopback (CSV, ``*`` = any).
+    # Only needed for a loopback bind behind a reverse proxy / custom name.
+    allowed_hosts_csv: str = Field(default="", alias="AGENT_OBS_ALLOWED_HOSTS")
     port: int = Field(default=8125, alias="AGENT_OBS_PORT")
     log_level: str = Field(default="INFO", alias="AGENT_OBS_LOG_LEVEL")
 
@@ -77,6 +82,14 @@ class Settings(BaseSettings):
     stepgo_home: str = Field(
         default="~/.stepgo",
         alias="AGENT_OBS_STEPGO_HOME",
+    )
+    agy_home: str = Field(
+        default="~/.gemini/antigravity-cli",
+        alias="AGENT_OBS_AGY_HOME",
+    )
+    gemini_home: str = Field(
+        default="~/.gemini",
+        alias="AGENT_OBS_GEMINI_HOME",
     )
 
     # --- Indexer runtime ---
@@ -152,17 +165,12 @@ class Settings(BaseSettings):
         alias="AGENT_OBS_ALLOWED_WORKSPACES",
     )
     # --- Security ---
-    session_secret: str = Field(
+    # HMAC key for short-lived signed payloads (Storage cleanup plans).  There
+    # are no accounts; machines deployed before accounts were removed still
+    # carry the key as AGENT_OBS_API_TOKEN_SECRET, which is accepted too.
+    signing_secret: str = Field(
         default="dev-only-change-me-use-random-64-chars",
-        alias="AGENT_OBS_SESSION_SECRET",
-    )
-    api_token_secret: str = Field(
-        default="dev-only-change-me-use-random-64-chars",
-        alias="AGENT_OBS_API_TOKEN_SECRET",
-    )
-    bootstrap_token: str = Field(
-        default="dev-only-bootstrap-admin-token",
-        alias="AGENT_OBS_BOOTSTRAP_TOKEN",
+        validation_alias=AliasChoices("AGENT_OBS_SIGNING_SECRET", "AGENT_OBS_API_TOKEN_SECRET"),
     )
 
     # --- Test overrides (used by conftest only) ---
@@ -219,6 +227,16 @@ class Settings(BaseSettings):
         )
 
     @property
+    def agy_brain_root(self) -> str:
+        """Antigravity CLI (``agy``) conversation directories."""
+        return os.path.join(os.path.expanduser(self.agy_home), "brain")
+
+    @property
+    def gemini_tmp_root(self) -> str:
+        """Gemini CLI temporary project/chat directories."""
+        return os.path.join(os.path.expanduser(self.gemini_home), "tmp")
+
+    @property
     def stepgo_host_root(self) -> str:
         return os.path.join(os.path.expanduser(self.stepgo_home), "sessions", "host")
 
@@ -237,6 +255,8 @@ class Settings(BaseSettings):
             "opencode": ["~/.local/share/opencode", "~/.config/opencode"],
             "pi": self.pi_sessions_roots,
             "xdcode": self.xdcode_sessions_roots,
+            "agy": [self.agy_brain_root],
+            "gemini": [self.gemini_tmp_root],
             # Only host run logs belong to StepGo itself.  Its managed agent
             # directories often symlink to native roots and must not be labelled
             # as StepGo sessions.
@@ -269,6 +289,16 @@ class Settings(BaseSettings):
         }
 
     @property
+    def probe_host(self) -> str:
+        """Address local health probes use; a wildcard bind is probed on loopback."""
+        host = self.host.strip()
+        return "127.0.0.1" if host in {"", "0.0.0.0", "::", "[::]"} else host
+
+    @property
+    def allowed_hosts(self) -> list[str]:
+        return _split_list(self.allowed_hosts_csv)
+
+    @property
     def allowed_workspaces(self) -> list[str]:
         return [v.strip() for v in self.allowed_workspaces_csv.split(",") if v.strip()]
 
@@ -298,10 +328,7 @@ class Settings(BaseSettings):
     def _forbid_prod_placeholders(self):
         secrets_ok = self.environment != "production"
         if not secrets_ok:
-            for label, value in [
-                ("session_secret", self.session_secret),
-                ("api_token_secret", self.api_token_secret),
-            ]:
+            for label, value in [("signing_secret", self.signing_secret)]:
                 if value.startswith("dev-only-") or len(value) < 32:
                     raise ValueError(f"{label} must be a strong random value in production")
         return self

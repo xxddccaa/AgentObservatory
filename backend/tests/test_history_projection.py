@@ -659,20 +659,12 @@ async def test_v0149_item_completed_projects_user_and_agent_messages(
     ]
 
 
-async def _login(client: AsyncClient, username: str, password: str) -> None:
-    response = await client.post(
-        "/api/auth/login", json={"username": username, "password": password}
-    )
-    assert response.status_code == 200, response.text
-
-
 @pytest.mark.anyio
 async def test_export_endpoint_text_markdown_json(
-    tmp_path: Path, client: AsyncClient, operator_user, db_session
+    tmp_path: Path, client: AsyncClient, db_session
 ) -> None:
     path = _write_rollout(tmp_path, "rollout-export.jsonl", _completed_rollout())
     session = await _index(db_session, path)
-    await _login(client, operator_user["username"], "operator-password-123")
 
     text_resp = await client.get(f"/api/codex/sessions/{session.id}/export?format=text")
     assert text_resp.status_code == 200, text_resp.text
@@ -706,11 +698,10 @@ async def test_export_endpoint_text_markdown_json(
 
 @pytest.mark.anyio
 async def test_search_endpoint_ranks_messages_before_tools(
-    tmp_path: Path, client: AsyncClient, operator_user, db_session
+    tmp_path: Path, client: AsyncClient, db_session
 ) -> None:
     path = _write_rollout(tmp_path, "rollout-search.jsonl", _completed_rollout())
     session = await _index(db_session, path)
-    await _login(client, operator_user["username"], "operator-password-123")
 
     resp = await client.get(f"/api/codex/sessions/{session.id}/search?q=directory")
     assert resp.status_code == 200, resp.text
@@ -732,11 +723,10 @@ async def test_search_endpoint_ranks_messages_before_tools(
 
 @pytest.mark.anyio
 async def test_messages_and_list_endpoints_expose_contract_fields(
-    tmp_path: Path, client: AsyncClient, operator_user, db_session
+    tmp_path: Path, client: AsyncClient, db_session
 ) -> None:
     path = _write_rollout(tmp_path, "rollout-contract.jsonl", _completed_rollout())
     session = await _index(db_session, path)
-    await _login(client, operator_user["username"], "operator-password-123")
 
     messages = (await client.get(f"/api/codex/sessions/{session.id}/messages")).json()["messages"]
     sample = messages[0]

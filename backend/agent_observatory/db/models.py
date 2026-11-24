@@ -1,10 +1,8 @@
-"""SQLAlchemy models + metadata (Phase 1: auth / RBAC / audit foundation).
+"""SQLAlchemy models + metadata.
 
-Phase 0 only exposed `metadata` so Alembic could reference it. Phase 1 adds a
-`DeclarativeBase` subclass and the user/role/session/audit tables that every
-later phase builds on. Mirrors the schema shape of resilient-codex-tasks-dev
-(`users`, `roles`, `user_roles`, `sessions`, `api_tokens`, `audit_logs`)
-but keeps only what Observatory needs.
+The observatory is a single-user, local tool: there are no accounts, roles,
+login sessions or API tokens (migration 0016 dropped those tables).  Every
+user and system action is still recorded in ``audit_logs``.
 """
 from __future__ import annotations
 
@@ -18,7 +16,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     MetaData,
     String,
     Text,
@@ -27,7 +24,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 #: Shared metadata object. `alembic/env.py` and the async engine both read
 #: `Base.metadata`, so registering models here automatically feeds migrations.
@@ -60,93 +57,11 @@ class TimestampMixin:
     )
 
 
-class User(Base, TimestampMixin):
-    __tablename__ = "users"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="true"
-    )
-
-    roles: Mapped[list[Role]] = relationship(
-        "Role", secondary="user_roles", back_populates="users", lazy="selectin"
-    )
-
-    @property
-    def role_names(self) -> set[str]:
-        return {r.name for r in self.roles}
-
-
-class Role(Base):
-    __tablename__ = "roles"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
-
-    users: Mapped[list[User]] = relationship(
-        "User", secondary="user_roles", back_populates="roles"
-    )
-
-
-class UserRole(Base):
-    __tablename__ = "user_roles"
-    __table_args__ = (Index("ix_user_roles_role_id", "role_id"),)
-
-    user_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
-    )
-    role_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True
-    )
-
-
-class Session(Base):
-    """Web login session. The raw token lives only in the browser cookie; the
-    DB stores `token_hash` = sha256(token)."""
-
-    __tablename__ = "sessions"
-    __table_args__ = (Index("ix_sessions_user_id", "user_id"),)
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    ip_address: Mapped[str | None] = mapped_column(String(64))
-    user_agent: Mapped[str | None] = mapped_column(Text)
-
-
-class ApiToken(Base):
-    """Bearer API token (programmatic access). Stored hashed like sessions."""
-
-    __tablename__ = "api_tokens"
-    __table_args__ = (Index("ix_api_tokens_user_id", "user_id"),)
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class AuditLog(Base):
     """Append-only record of every user and system action.
 
-    `actor_type` ∈ {user, system, bootstrap}. `result` ∈ {success, failure,
+    `actor_type` ∈ {local, system} (``user`` / ``bootstrap`` on rows written
+    before accounts were removed; their ``actor_id`` is a historical id). `result` ∈ {success, failure,
     error}. The `detail` JSONB carries action-specific before/after/input
     summaries — never secrets (see AGENTS.md #19).
     """
@@ -159,11 +74,9 @@ class AuditLog(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    actor_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("users.id", ondelete="SET NULL")
-    )
+    actor_id: Mapped[str | None] = mapped_column(String(64))
     actor_type: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="user"
+        String(32), nullable=False, server_default="local"
     )
     action: Mapped[str] = mapped_column(String(128), nullable=False)
     resource_type: Mapped[str | None] = mapped_column(String(64))
@@ -875,7 +788,7 @@ class ThreadGoal(Base, TimestampMixin):
 class RetentionRun(Base, TimestampMixin):
     """One audited local-data cleanup request and its outcome.
 
-    The row is created when an administrator requests a purge (before the
+    The row is created when a local user requests a purge (before the
     Supervisor applies it) so the request survives a restart, then completed in
     place with the freed-byte accounting.
     """
@@ -926,11 +839,6 @@ __all__ = [
     "Base",
     "metadata",
     "TimestampMixin",
-    "User",
-    "Role",
-    "UserRole",
-    "Session",
-    "ApiToken",
     "AuditLog",
     "Workspace",
     "SystemCommand",

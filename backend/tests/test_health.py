@@ -17,7 +17,7 @@ async def test_health_reports_components_when_up() -> None:
         await connection.execute(text("DELETE FROM worker_heartbeats"))
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         r = await client.get("/api/health")
     assert r.status_code == 200
     body = r.json()
@@ -34,7 +34,7 @@ async def test_liveness_does_not_require_dependencies() -> None:
     from agent_observatory.main import app
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         response = await client.get("/api/health/live")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "version": "0.1.0"}
@@ -87,7 +87,7 @@ async def test_health_surfaces_indexer_cycle_stats() -> None:
 
     try:
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             body = (await client.get("/api/health")).json()
         indexer = body["components"]["indexer"]
         assert indexer["status"] == "up"
@@ -116,7 +116,7 @@ async def test_public_health_does_not_expose_private_worker_errors(db_session) -
     ))
     await db_session.commit()
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         for route in ("/api/health", "/api/health/ready"):
             response = await client.get(route)
             assert response.status_code == 200

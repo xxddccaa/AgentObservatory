@@ -1,9 +1,9 @@
-"""Authenticated project-level token analytics API."""
+"""Project-level token analytics API."""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from agent_observatory.api.deps import DB, CurrentPrincipal
+from agent_observatory.api.deps import DB
 from agent_observatory.services import projects as service
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -12,7 +12,6 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 @router.get("")
 async def list_projects(
     db: DB,
-    principal: CurrentPrincipal,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     q: str | None = None,
@@ -38,7 +37,6 @@ async def list_projects(
 async def get_project(
     workspace_id: str,
     db: DB,
-    principal: CurrentPrincipal,
 ):
     result = await service.get_project(db, workspace_id)
     if result is None:
@@ -50,7 +48,6 @@ async def get_project(
 async def get_project_timeseries(
     workspace_id: str,
     db: DB,
-    principal: CurrentPrincipal,
     range_name: str = Query("day", alias="range"),
 ):
     try:

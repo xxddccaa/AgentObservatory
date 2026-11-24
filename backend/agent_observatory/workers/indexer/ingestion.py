@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
-from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,19 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_observatory.db.models import AgentEvent, AgentSession, AgentTurn
 from agent_observatory.services.history import project_events
 
-from .adapters import PlanAction, SourcePlan
+from .adapters import PlanAction, SourcePlan, StepCodeImporter
+from .adapters.common import pg_safe as _pg_safe
 from .scanner import RolloutScanner
-from .stepcode import StepCodeImporter
-
-
-def _pg_safe(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.replace("\x00", "\\u0000")
-    if isinstance(value, dict):
-        return {str(_pg_safe(k)): _pg_safe(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_pg_safe(v) for v in value]
-    return value
 
 
 class EventIngestor:

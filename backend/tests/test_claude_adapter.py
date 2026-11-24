@@ -8,8 +8,8 @@ from sqlalchemy import select
 
 from agent_observatory.db.models import AgentEvent, AgentTurn, CodexMessage, ToolCall
 from agent_observatory.workers.indexer.adapters import PlanAction, SourcePlan
-from agent_observatory.workers.indexer.claude import ClaudeJsonlSource
-from agent_observatory.workers.indexer.claude_parser import iter_records
+from agent_observatory.workers.indexer.adapters.claude import ClaudeJsonlSource
+from agent_observatory.workers.indexer.adapters.claude_parser import iter_records
 
 
 def _write(path: Path, rows: list[dict]) -> None:

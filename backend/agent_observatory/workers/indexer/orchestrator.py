@@ -33,16 +33,21 @@ from .adapters import (
     SourceAdapter,
     SourceDescriptor,
     SourcePlan,
+    StepCodeImporter,
     StepCodeSqliteSource,
+    StepGoHostSource,
 )
 from .checkpoints import CheckpointRepository
 from .fingerprints import sqlite_change_counter
 from .ingestion import EventIngestor
 from .linking import SessionLinker, has_visible_text
 from .scanner import RolloutScanner
-from .stepcode import StepCodeImporter
-from .stepgo_host import StepGoHostSource
 from .tree_cache import cached_resolve, scan_mode
+
+#: Append-only logs whose checkpoint keeps the size/mtime seen while
+#: *planning*: a line appended during the ingest then still differs from the
+#: checkpoint on the next poll instead of hiding behind the post-ingest stat.
+_PLANNED_FINGERPRINT_KINDS = frozenset({"pi_jsonl", "agy_jsonl", "gemini_jsonl"})
 
 
 def _elapsed_ms(started: float) -> float:
@@ -734,8 +739,8 @@ class IndexerOrchestrator:
                 final = source.path.stat()
                 fingerprint = {
                     **plan.fingerprint,
-                    "size": plan.fingerprint["size"] if source.kind == "pi_jsonl" else final.st_size,
-                    "mtime_ns": plan.fingerprint["mtime_ns"] if source.kind == "pi_jsonl" else final.st_mtime_ns,
+                    "size": plan.fingerprint["size"] if source.kind in _PLANNED_FINGERPRINT_KINDS else final.st_size,
+                    "mtime_ns": plan.fingerprint["mtime_ns"] if source.kind in _PLANNED_FINGERPRINT_KINDS else final.st_mtime_ns,
                 }
                 await self.checkpoints.mark_success(
                     checkpoint,

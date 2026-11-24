@@ -1,7 +1,7 @@
 """Storage / retention API.
 
-Read endpoints are open to operators, the destructive endpoint is admin-only
-and never executes anything inline: it writes a ``system_commands`` row that
+Read endpoints are read-only, and the purge endpoint
+never executes anything inline: it writes a ``system_commands`` row that
 the local Supervisor applies (AGENTS.md: control actions go through the
 command table first, and every one of them is audited).
 """
@@ -16,8 +16,6 @@ from pydantic import BaseModel, Field
 
 from agent_observatory.api.deps import (
     DB,
-    AdminPrincipal,
-    OperatorPrincipal,
     _client_ip,
     _user_agent,
 )
@@ -59,7 +57,6 @@ def _selection_payload(selection: service.Selection) -> dict[str, Any]:
 @router.get("/overview")
 async def get_overview(
     db: DB,
-    principal: OperatorPrincipal,
     refresh: bool = False,
 ) -> dict[str, Any]:
     try:
@@ -70,7 +67,7 @@ async def get_overview(
 
 
 @router.get("/catalog")
-async def get_catalog(principal: OperatorPrincipal) -> dict[str, Any]:
+async def get_catalog() -> dict[str, Any]:
     config = settings()
     return {
         "enabled": bool(config.retention_enabled),
@@ -97,7 +94,6 @@ async def get_catalog(principal: OperatorPrincipal) -> dict[str, Any]:
 async def post_preview(
     body: PreviewRequest,
     db: DB,
-    principal: OperatorPrincipal,
 ) -> dict[str, Any]:
     try:
         selection = body.selection.to_selection()
@@ -106,7 +102,7 @@ async def post_preview(
     except service.RetentionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     summary = planned.summary()
-    summary["plan_token"] = service.sign_plan(selection, summary, actor_id=principal.user_id)
+    summary["plan_token"] = service.sign_plan(selection, summary)
     summary["selection"] = _selection_payload(selection)
     summary["protected_roots"] = list(settings().retention_protected_roots)
     summary["large_run_bytes"] = int(settings().retention_large_run_bytes)
@@ -132,7 +128,6 @@ async def create_run(
     body: RunRequest,
     request: Request,
     db: DB,
-    principal: AdminPrincipal,
 ) -> dict[str, Any]:
     if not settings().retention_enabled:
         raise HTTPException(status_code=409, detail="retention is disabled")
@@ -142,8 +137,6 @@ async def create_run(
         sealed = service.verify_plan(body.plan_token)
     except service.RetentionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if sealed.get("actor") not in (None, "", principal.user_id):
-        raise HTTPException(status_code=403, detail="plan was issued for another user")
     try:
         selection = service.Selection.from_payload(sealed.get("selection"))
         planned = service.plan(selection)
@@ -151,7 +144,6 @@ async def create_run(
     except service.RetentionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    summary = planned.summary()
     previewed_bytes = int(sealed.get("bytes") or 0)
     if (
         planned.bytes_total
@@ -183,14 +175,13 @@ async def create_run(
         db,
         selection=selection,
         plan_obj=planned,
-        principal_id=principal.user_id,
         scope=scope,
     )
     command = SystemCommand(
         command_type="retention.purge",
         component=None,
         target_instance=supervisor_instance_id(settings().home),
-        requested_by=principal.user_id,
+        requested_by=service.REQUESTED_BY_LOCAL,
         payload={"run_id": run.id},
     )
     db.add(command)
@@ -199,7 +190,6 @@ async def create_run(
     await audit.record(
         db,
         action="retention.purge.requested",
-        actor_id=principal.user_id,
         resource_type="retention_run",
         resource_id=run.id,
         request_id=getattr(request.state, "request_id", None),
@@ -235,7 +225,6 @@ def _wake_supervisor() -> None:
 @router.get("/runs")
 async def list_runs(
     db: DB,
-    principal: OperatorPrincipal,
     limit: int = 20,
 ) -> dict[str, Any]:
     limit = max(1, min(limit, 100))
@@ -247,7 +236,6 @@ async def list_runs(
 async def get_run(
     run_id: str,
     db: DB,
-    principal: OperatorPrincipal,
 ) -> dict[str, Any]:
     row = await db.get(RetentionRun, run_id)
     if row is None:

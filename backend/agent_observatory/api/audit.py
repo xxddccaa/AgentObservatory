@@ -7,7 +7,7 @@ import json
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 
-from agent_observatory.api.deps import DB, CurrentPrincipal
+from agent_observatory.api.deps import DB
 from agent_observatory.db.models import AuditLog
 from agent_observatory.services.audit import list_audit
 
@@ -35,7 +35,6 @@ def _serialize(row: AuditLog) -> dict:
 @router.get("")
 async def audit_list(
     db: DB,
-    principal: CurrentPrincipal,
     limit: int = Query(default=100, ge=1, le=500),
     cursor: int | None = Query(default=None),
     actor_id: str | None = None,
@@ -50,7 +49,6 @@ async def audit_list(
 @router.get("/export")
 async def audit_export(
     db: DB,
-    principal: CurrentPrincipal,
     format: str = Query(default="json", pattern="^(json|csv)$"),
     limit: int = Query(default=1000, ge=1, le=10000),
 ):

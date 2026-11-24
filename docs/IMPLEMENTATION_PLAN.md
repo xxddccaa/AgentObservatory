@@ -3,6 +3,8 @@
 > 仓库根目录：当前 checkout（部署与测试命令均在仓库内执行）
 > 状态：已实现（P0–P4 代码、测试与运行验证完成；持续维护中）
 > 最后更新：2026-09-02
+> 2026-11-24：按用户要求删除登录 / 账号 / 角色 / API token（迁移 `0016_drop_accounts`），
+> 下文涉及 RBAC、session cookie、admin/operator/viewer 的内容仅作历史记录；当前访问控制见 `docs/architecture.md` 的 Security And Audit。
 
 ## 文档目的
 
@@ -220,6 +222,7 @@ checkpoint  写回 index_checkpoints（游标+指纹+parser_version），保证�
 | codex | `~/.codex/{thread_history_1,logs_2,state_5,goals_1}.sqlite` + `skills/` | `codex_sqlite` | stepcode.py/local_sources.py | 复用 |
 | stepcode | `~/.stepcode/codex/*.sqlite`（sessions/history 软链到 ~/.codex） | `codex_sqlite` | 复用，agent=stepcode | P1 |
 | stepcli | `~/.step-cli/sessions/*/{session.json,events.jsonl}` | `stepcli_json` | stepcli.py 原生会话适配器 | 已实现（2026-09-03） |
+| agy | `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl` | `agy_jsonl` | agy.py 增量 transcript 适配器；标题 / 工作目录取自 `conversation_summaries.db` | 已实现（2026-11-24） |
 | stepcode | `~/.stepcode/claude/projects/**/*.jsonl` | `claude_jsonl` | claude 解析器，agent=stepcode | P2 |
 | claude | `~/.claude/projects/**/*.jsonl` | `claude_jsonl` | 移植自 ClaudeObservatory | P2 |
 | dsh | `~/.dsh/sessions/<编码cwd>/session-<uuid>/session.jsonl.zstd` | `dsh_jsonl` | 新写（zstd 事件流） | P3 |

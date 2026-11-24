@@ -45,7 +45,7 @@ describe("Insights API", () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       "/api/insights/overview?from=2026-08-01T00%3A00%3A00Z&to=2026-08-02T00%3A00%3A00Z&workspace_id=%2Ftmp%2Fa+b&agent=stepcode"
     );
-    expect(fetchMock.mock.calls[0][1]).toEqual(expect.objectContaining({ credentials: "include" }));
+    expect(fetchMock.mock.calls[0][1]).toEqual(expect.objectContaining({ credentials: "same-origin" }));
   });
 
   it("requests encoded timeline and evidence identifiers", async () => {

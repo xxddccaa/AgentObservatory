@@ -11,9 +11,12 @@ import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from .common import MAX_LINE_BYTES, iter_raw_jsonl_lines, pg_safe
+from .common import parse_ts as timestamp
 
 KNOWN_PI_TYPES = {
     "session",
@@ -30,33 +33,7 @@ KNOWN_PI_TYPES = {
     "custom",
 }
 
-_MAX_LINE_BYTES = 8 * 1024 * 1024
-
-
-def timestamp(value: Any) -> datetime | None:
-    if isinstance(value, (int, float)):
-        seconds = value / 1000 if abs(value) > 100_000_000_000 else value
-        try:
-            return datetime.fromtimestamp(seconds, tz=UTC)
-        except (OverflowError, OSError, ValueError):
-            return None
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-    except ValueError:
-        return None
-
-
-def pg_safe(value: Any) -> Any:
-    """Escape NULs, which PostgreSQL JSONB/text cannot store literally."""
-    if isinstance(value, str):
-        return value.replace("\x00", "\\u0000")
-    if isinstance(value, dict):
-        return {pg_safe(key): pg_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [pg_safe(item) for item in value]
-    return value
+_MAX_LINE_BYTES = MAX_LINE_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,65 +129,46 @@ def iter_records(
     malformed line is preserved as a synthetic ``parse_error`` record, so the
     cursor can advance and no bytes silently disappear.
     """
-    consumed = 0
-    with Path(path).open("rb") as handle:
-        handle.seek(offset)
-        line_number = line_offset
-        while True:
-            if max_bytes is not None and consumed >= max_bytes:
-                return
-            byte_offset = handle.tell()
-            chunks: list[bytes] = []
-            line_size = 0
-            too_large = False
-            digest = hashlib.sha256()
-            while True:
-                chunk = handle.readline(64 * 1024)
-                if not chunk:
-                    if not chunks:
-                        return
-                    # EOF without a newline means the writer is still appending.
-                    return
-                digest.update(chunk)
-                line_size += len(chunk)
-                if line_size > _MAX_LINE_BYTES:
-                    too_large = True
-                    chunks.clear()
-                elif not too_large:
-                    chunks.append(chunk)
-                if chunk.endswith(b"\n"):
-                    break
-            consumed += line_size
-            if too_large:
-                line_number += 1
-                yield PiRecord(
-                    line_number=line_number,
-                    byte_offset=byte_offset,
-                    byte_length=line_size,
-                    raw_json={
-                        "type": "parse_error",
-                        "error": "line_too_large",
-                        "bytes": line_size,
-                    },
-                    raw_hash=digest.hexdigest(),
-                    event_timestamp=None,
-                )
-                continue
-            raw = b"".join(chunks)
-            try:
-                record = parse_line(
-                    raw.decode("utf-8"),
-                    line_number=line_number + 1,
-                    byte_offset=byte_offset,
-                )
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                line_number += 1
-                yield _parse_error_record(
-                    raw, line_number=line_number, byte_offset=byte_offset
-                )
-                continue
-            line_number = record.line_number
-            yield record
+    line_number = line_offset
+    for item in iter_raw_jsonl_lines(
+        path,
+        offset=offset,
+        max_line_bytes=_MAX_LINE_BYTES,
+        max_bytes=max_bytes,
+    ):
+        if not item.terminated:
+            # EOF without a newline means the writer is still appending.
+            return
+        if item.oversized_hash is not None:
+            line_number += 1
+            yield PiRecord(
+                line_number=line_number,
+                byte_offset=item.byte_offset,
+                byte_length=item.byte_length,
+                raw_json={
+                    "type": "parse_error",
+                    "error": "line_too_large",
+                    "bytes": item.byte_length,
+                },
+                raw_hash=item.oversized_hash,
+                event_timestamp=None,
+            )
+            continue
+        assert item.raw is not None
+        try:
+            record = parse_line(
+                item.raw.decode("utf-8"),
+                line_number=line_number + 1,
+                byte_offset=item.byte_offset,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            line_number += 1
+            yield _parse_error_record(
+                item.raw, line_number=line_number, byte_offset=item.byte_offset
+            )
+            continue
+        line_number = record.line_number
+        yield record
 
 
 def content_blocks(record: PiRecord) -> list[dict[str, Any]]:

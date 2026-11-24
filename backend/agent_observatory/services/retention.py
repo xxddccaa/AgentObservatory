@@ -694,14 +694,17 @@ def _entry_summary(
 # --------------------------------------------------------------------------
 # plan token
 # --------------------------------------------------------------------------
+#: ``requested_by`` of runs submitted from the (login-free) web UI / API.
+REQUESTED_BY_LOCAL = "local"
+
+
 def _secret() -> bytes:
-    return settings().api_token_secret.encode()
+    return settings().signing_secret.encode()
 
 
-def sign_plan(selection: Selection, summary: dict[str, Any], *, actor_id: str) -> str:
+def sign_plan(selection: Selection, summary: dict[str, Any]) -> str:
     payload = {
         "v": 1,
-        "actor": actor_id,
         "selection": selection.to_payload(),
         "bytes": summary["totals"]["bytes"],
         "files": summary["totals"]["files"],
@@ -1249,12 +1252,12 @@ async def create_run(
     *,
     selection: Selection,
     plan_obj: Plan,
-    principal_id: str,
     scope: str,
+    requested_by: str = REQUESTED_BY_LOCAL,
 ) -> RetentionRun:
     run = RetentionRun(
         id=new_run_id(),
-        requested_by=principal_id,
+        requested_by=requested_by,
         scope=scope,
         status=RUN_PENDING,
         keep_days=selection.keep_days,

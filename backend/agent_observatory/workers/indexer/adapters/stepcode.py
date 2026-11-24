@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .tree_cache import cached_resolve, rglob_cached
+from ..tree_cache import cached_resolve, rglob_cached
 
 
 @dataclass(frozen=True, slots=True)

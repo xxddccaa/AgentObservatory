@@ -76,7 +76,47 @@ def test_manage_uses_machine_cli_without_shared_dependencies(tmp_path):
 
 def test_deployment_rejects_shared_data_directory(tmp_path):
     with pytest.raises(ValueError, match="under /root"):
-        deploy_module().local_home("/mnt/shared/synthetic-observatory")
+        deploy_module().local_home("/mnt/shared/synthetic-observatory", profile="root")
+
+
+def test_user_profile_keeps_runtime_under_the_user_home(monkeypatch, tmp_path):
+    deploy = deploy_module()
+    monkeypatch.setattr(deploy.Path, "home", classmethod(lambda cls: tmp_path))
+    home = deploy.local_home(str(tmp_path / ".agent-observatory"), profile="user")
+    assert home == (tmp_path / ".agent-observatory").resolve()
+    assert home.is_dir()
+    with pytest.raises(ValueError, match="dedicated directory under"):
+        deploy.local_home(str(tmp_path), profile="user")
+    with pytest.raises(ValueError, match="dedicated directory under"):
+        deploy.local_home("/mnt/shared/synthetic-observatory", profile="user")
+
+
+def test_user_profile_runs_postgres_as_invoking_user(monkeypatch, tmp_path):
+    deploy = deploy_module()
+    monkeypatch.setattr(deploy, "PROFILE", "user")
+    assert deploy.as_postgres(["pg_ctl", "status"]) == ["pg_ctl", "status"]
+    monkeypatch.setattr(deploy, "PROFILE", "root")
+    assert deploy.as_postgres(["pg_ctl", "status"])[:4] == ["runuser", "-u", "postgres", "--"]
+
+
+def test_user_profile_prefers_the_cluster_major(monkeypatch, tmp_path):
+    deploy = deploy_module()
+    monkeypatch.setattr(deploy, "PROFILE", "user")
+    monkeypatch.delenv("AGENT_OBS_PG_BIN", raising=False)
+    brew = tmp_path / "brew"
+    for major in ("16", "17"):
+        (brew / f"postgresql@{major}" / "bin").mkdir(parents=True)
+        (brew / f"postgresql@{major}" / "bin" / "initdb").write_text("")
+    monkeypatch.setattr(deploy, "HOMEBREW_PREFIXES", (brew,))
+    home = tmp_path / "home"
+    assert deploy.postgres_binaries(home, {}) == brew / "postgresql@16" / "bin"
+    (home / "postgresql" / "data").mkdir(parents=True)
+    (home / "postgresql" / "data" / "PG_VERSION").write_text("17\n")
+    assert deploy.postgres_binaries(home, {}) == brew / "postgresql@17" / "bin"
+    assert deploy.postgres_binaries(home, {"AGENT_OBS_PG_BIN": "/pg/bin"}) == Path("/pg/bin")
+    (home / "postgresql" / "data" / "PG_VERSION").write_text("15\n")
+    with pytest.raises(ValueError, match="PostgreSQL 15 not found"):
+        deploy.postgres_binaries(home, {})
 
 
 def test_e2e_refuses_non_ci_before_running_migrations(tmp_path):
@@ -116,6 +156,7 @@ def test_postgres_profile_defaults_overrides_and_validation():
 
 def test_tune_postgresql_applies_profile_and_reports_restart(monkeypatch, tmp_path):
     deploy = deploy_module()
+    monkeypatch.setattr(deploy, "PROFILE", "root")
     inputs: list[str] = []
 
     def fake_run(command, *, input_text=None, capture=False, **_kwargs):
@@ -133,3 +174,14 @@ def test_tune_postgresql_applies_profile_and_reports_restart(monkeypatch, tmp_pa
     assert "pg_reload_conf()" in inputs[0]
     assert "('max_connections', '100')" in inputs[1]
     assert "secret" not in "".join(inputs)
+
+
+def test_listen_host_defaults_to_loopback_and_warns_for_the_network(capsys):
+    deploy = deploy_module()
+    assert deploy.listen_host(None) == "127.0.0.1"
+    assert deploy.listen_host("localhost") == "localhost"
+    assert capsys.readouterr().err == ""
+    assert deploy.listen_host("0.0.0.0") == "0.0.0.0"
+    assert "without login" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="AGENT_OBS_HOST"):
+        deploy.listen_host("observatory.example")

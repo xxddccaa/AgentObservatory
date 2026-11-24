@@ -75,6 +75,18 @@ const normalized = computed(() => props.agent.trim().toLowerCase() || "generic")
   color: #f5a4c2;
 }
 
+.agent-badge[data-agent="agy"] {
+  border-color: color-mix(in srgb, #8fc97a 48%, var(--border));
+  background: color-mix(in srgb, #8fc97a 12%, transparent);
+  color: #a6d993;
+}
+
+.agent-badge[data-agent="gemini"] {
+  border-color: color-mix(in srgb, #4da3ff 48%, var(--border));
+  background: color-mix(in srgb, #4da3ff 12%, transparent);
+  color: #8cc2ff;
+}
+
 .agent-badge[data-agent="generic"] {
   border-color: var(--border);
   background: var(--panel-2);

@@ -1,60 +1,21 @@
-"""Read-only source adapters and indexing plans."""
+"""Codex, XDCode, and StepCode SQLite source adapters."""
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from agent_observatory.db.models import IndexCheckpoint
 
-from .fingerprints import (
+from ..fingerprints import (
     file_fingerprint,
     indexed_content_matches,
     sqlite_signature,
     sqlite_signature_is_racy,
 )
-from .scanner import RolloutScanner
+from ..scanner import RolloutScanner
+from .base import PlanAction, SourceDescriptor, SourcePlan
 from .stepcode import StepCodeImporter
-
-
-class PlanAction(StrEnum):
-    UNCHANGED = "unchanged"
-    APPEND = "append"
-    REBUILD = "rebuild"
-
-
-@dataclass(frozen=True, slots=True)
-class SourceDescriptor:
-    kind: str
-    identity: str
-    path: Path
-    format: str
-    agent: str = "codex"
-    compression: str | None = None
-    thread_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SourcePlan:
-    source: SourceDescriptor
-    action: PlanAction
-    fingerprint: dict[str, Any]
-
-
-class SourceAdapter(Protocol):
-    kind: str
-    agent: str
-    parser_version: str
-
-    def discover(self) -> list[SourceDescriptor]: ...
-
-    def plan(
-        self, source: SourceDescriptor, checkpoint: IndexCheckpoint | None
-    ) -> SourcePlan: ...
-
-    async def ingest(self, db: Any, plan: SourcePlan) -> Any: ...
 
 
 class CodexJsonlSource:
@@ -110,11 +71,15 @@ class CodexJsonlSource:
             "compression": source.compression,
         }
         if checkpoint is None or checkpoint.parser_version != self.scanner.parser_version:
-            return SourcePlan(source, PlanAction.REBUILD, {**fingerprint, **file_fingerprint(source.path)})
+            return SourcePlan(
+                source, PlanAction.REBUILD, {**fingerprint, **file_fingerprint(source.path)}
+            )
         previous = checkpoint.fingerprint_json or {}
         cursor = checkpoint.cursor_json or {}
         if previous.get("path") != fingerprint["path"]:
-            return SourcePlan(source, PlanAction.REBUILD, {**fingerprint, **file_fingerprint(source.path)})
+            return SourcePlan(
+                source, PlanAction.REBUILD, {**fingerprint, **file_fingerprint(source.path)}
+            )
         if previous.get("compression") != source.compression:
             return SourcePlan(source, PlanAction.REBUILD, fingerprint)
         if source.compression == "zstd":
@@ -137,11 +102,7 @@ class CodexJsonlSource:
         return SourcePlan(source, action, fingerprint)
 
     async def ingest(self, db: Any, plan: SourcePlan) -> Any:
-        """Ingest through the canonical rollout scanner.
-
-        The orchestrator still owns checkpoint bookkeeping, but exposing this
-        method keeps every registered adapter conformant to ``SourceAdapter``.
-        """
+        """Ingest through the canonical rollout scanner."""
         session = await self.scanner.index_path(
             db, plan.source.path, force_rebuild=plan.action == PlanAction.REBUILD
         )
@@ -150,19 +111,16 @@ class CodexJsonlSource:
 
 
 class XDCodeJsonlSource(CodexJsonlSource):
-    """XDCode rollout adapter built on the Codex-compatible reader.
-
-    The file format is Codex-compatible but XDCode owns a distinct agent,
-    source kind and identity namespace.  Sharing the scanner keeps append,
-    truncation and checkpoint semantics identical instead of forking them.
-    """
+    """XDCode rollout adapter built on the Codex-compatible reader."""
 
     kind = "xdcode_jsonl"
     agent = "xdcode"
 
     def __init__(self, scanner: RolloutScanner) -> None:
         if (scanner.agent, scanner.source_kind, scanner.identity_prefix) != (
-            "xdcode", "xdcode_jsonl", "xdcode"
+            "xdcode",
+            "xdcode_jsonl",
+            "xdcode",
         ):
             scanner = RolloutScanner(
                 scanner.root,
@@ -199,12 +157,7 @@ class StepCodeSqliteSource:
         return (source.path, Path(f"{source.path}-wal"))
 
     def _thread_ids(self, path: Path, now: float) -> list[str]:
-        """Thread ids of one store, re-read only when the store changed.
-
-        Listing threads opens the database, and even a read-only connection
-        rewrites the agent's ``-shm`` file; an unchanged signature means no
-        write happened, so the previous list is still exact.
-        """
+        """Thread ids of one store, re-read only when the store changed."""
         key = str(path)
         try:
             signature: tuple[Any, ...] | None = sqlite_signature(path)
@@ -289,7 +242,7 @@ class StepCodeSqliteSource:
 
     async def ingest(self, db: Any, plan: SourcePlan) -> Any:
         """Project one StepCode thread using the shared ingestion pipeline."""
-        from .ingestion import EventIngestor
+        from ..ingestion import EventIngestor
 
         scanner = RolloutScanner(self.importer.root)
         ingestor = EventIngestor(scanner, self.importer)
@@ -298,10 +251,6 @@ class StepCodeSqliteSource:
 
 __all__ = [
     "CodexJsonlSource",
-    "PlanAction",
-    "SourceDescriptor",
-    "SourceAdapter",
-    "SourcePlan",
     "StepCodeSqliteSource",
     "XDCodeJsonlSource",
 ]

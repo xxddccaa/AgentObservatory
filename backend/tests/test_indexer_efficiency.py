@@ -234,7 +234,7 @@ async def test_local_scan_cadence_is_independent_of_the_main_loop(
 
     assert len(stub.calls) >= 3, stub.calls
     interval = 0.05
-    gaps = [later - earlier for earlier, later in zip(stub.calls, stub.calls[1:])]
+    gaps = [later - earlier for earlier, later in zip(stub.calls, stub.calls[1:], strict=False)]
     # The first iteration pays one-off warm-up (DB session, adapter setup) before it
     # reaches the ingest call, which can land the second call closer than the interval.
     # Assert the steady-state cadence: never a busy loop, never stretched to the slow

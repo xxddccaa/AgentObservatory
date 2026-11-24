@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import and_, exists, func, or_, select
 
-from agent_observatory.api.deps import DB, CurrentPrincipal
+from agent_observatory.api.deps import DB
 from agent_observatory.db.models import (
     AgentEvent,
     AgentSession,
@@ -105,7 +105,6 @@ def _decode_cursor(value: str) -> tuple[datetime, str]:
 @router.get("/sessions")
 async def list_history(
     db: DB,
-    principal: CurrentPrincipal,
     limit: int = Query(100, ge=1, le=200),
     cursor: str | None = None,
     q: str | None = None,
@@ -252,7 +251,7 @@ async def _session(db, session_id: str) -> AgentSession:
 
 
 @router.get("/sessions/{session_id}")
-async def get_history(session_id: str, db: DB, principal: CurrentPrincipal):
+async def get_history(session_id: str, db: DB):
     row = await _session(db, session_id)
     runs = list(
         (
@@ -288,7 +287,6 @@ async def get_history(session_id: str, db: DB, principal: CurrentPrincipal):
 @router.get("/stepgo/runs")
 async def list_stepgo_runs(
     db: DB,
-    principal: CurrentPrincipal,
     limit: int = Query(100, ge=1, le=200),
     link_status: str | None = None,
     agent: str | None = Query(None, min_length=1, max_length=32),
@@ -331,7 +329,6 @@ async def list_stepgo_runs(
 async def list_stepgo_run_events(
     run_id: str,
     db: DB,
-    principal: CurrentPrincipal,
     limit: int = Query(500, ge=1, le=2000),
     after: int = Query(-1, ge=-1),
 ):
@@ -368,7 +365,7 @@ async def list_stepgo_run_events(
 
 
 @router.get("/sessions/{session_id}/stepgo-runs")
-async def session_stepgo_runs(session_id: str, db: DB, principal: CurrentPrincipal):
+async def session_stepgo_runs(session_id: str, db: DB):
     await _session(db, session_id)
     rows = list(
         (
@@ -383,7 +380,7 @@ async def session_stepgo_runs(session_id: str, db: DB, principal: CurrentPrincip
 
 
 @router.get("/sessions/{session_id}/events")
-async def history_events(session_id: str, db: DB, principal: CurrentPrincipal):
+async def history_events(session_id: str, db: DB):
     await _session(db, session_id)
     rows = list(
         (
@@ -398,7 +395,7 @@ async def history_events(session_id: str, db: DB, principal: CurrentPrincipal):
 
 
 @router.get("/sessions/{session_id}/messages")
-async def history_messages(session_id: str, db: DB, principal: CurrentPrincipal):
+async def history_messages(session_id: str, db: DB):
     await _session(db, session_id)
     rows = list(
         (
@@ -428,7 +425,7 @@ async def history_messages(session_id: str, db: DB, principal: CurrentPrincipal)
 
 
 @router.get("/sessions/{session_id}/turns")
-async def history_turns(session_id: str, db: DB, principal: CurrentPrincipal):
+async def history_turns(session_id: str, db: DB):
     await _session(db, session_id)
     rows = list(
         (
@@ -457,7 +454,7 @@ async def history_turns(session_id: str, db: DB, principal: CurrentPrincipal):
 
 
 @router.get("/sessions/{session_id}/tools")
-async def history_tools(session_id: str, db: DB, principal: CurrentPrincipal):
+async def history_tools(session_id: str, db: DB):
     await _session(db, session_id)
     rows = list(
         (
@@ -492,7 +489,6 @@ async def history_tools(session_id: str, db: DB, principal: CurrentPrincipal):
 async def export_session(
     session_id: str,
     db: DB,
-    principal: CurrentPrincipal,
     format: str = Query("text"),
 ):
     session = await _session(db, session_id)
@@ -542,7 +538,6 @@ async def export_session(
 async def search_history(
     session_id: str,
     db: DB,
-    principal: CurrentPrincipal,
     q: str = Query(""),
     limit: int = Query(100, ge=1, le=500),
 ):

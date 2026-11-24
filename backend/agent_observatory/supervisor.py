@@ -34,8 +34,41 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+#: Linux exposes process state in procfs; elsewhere (macOS) ps(1) is used.
+_HAS_PROCFS = Path("/proc/self/stat").exists()
+
+
+def _ps_state_and_start(pid: int) -> tuple[str, str] | None:
+    """``(state, start time)`` of ``pid`` from ps(1), for systems without procfs.
+
+    The start time is joined with ``_`` so the token stays one field in the
+    space-separated pid file.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = result.stdout.split()
+    if result.returncode != 0 or len(fields) < 2:
+        return None
+    return fields[0], "_".join(fields[1:])
+
+
 def _proc_start_token(pid: int) -> str | None:
-    """Return Linux process start ticks, used to avoid PID reuse hazards."""
+    """Return the process start time, used to avoid PID reuse hazards.
+
+    Linux uses the start ticks from procfs; other systems use ps(1).
+    """
+    if not _HAS_PROCFS:
+        info = _ps_state_and_start(pid)
+        return info[1] if info else None
     try:
         fields = Path(f"/proc/{pid}/stat").read_text().split()
         return fields[21] if len(fields) > 21 else None
@@ -50,6 +83,11 @@ def pid_matches(pid: int, start_token: str | None) -> bool:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError, OSError):
         return False
+    if not _HAS_PROCFS:
+        info = _ps_state_and_start(pid)
+        if info is None or info[0].startswith("Z"):
+            return False
+        return start_token is None or info[1] == start_token
     try:
         fields = Path(f"/proc/{pid}/stat").read_text().split()
         if len(fields) > 2 and fields[2] == "Z":
@@ -649,9 +687,9 @@ class Supervisor:
             checks[executable] = {"ok": shutil.which(executable) is not None}
         checks["runtime_dir"] = {"ok": self.runtime_dir.exists(), "path": str(self.runtime_dir)}
         checks["logs_dir"] = {"ok": self.logs_dir.exists(), "path": str(self.logs_dir)}
-        api_live = _api_live(settings().host, settings().port)
+        api_live = _api_live(settings().probe_host, settings().port)
         checks["api_port"] = {
-            "ok": api_live or _port_available(settings().host, settings().port),
+            "ok": api_live or _port_available(settings().probe_host, settings().port),
             "port": settings().port,
             "state": "observatory" if api_live else "available",
         }
@@ -661,26 +699,18 @@ class Supervisor:
             "path": str(root / "frontend" / "dist" / "index.html"),
         }
 
-        async def dependency_checks() -> tuple[bool, bool, bool]:
+        async def dependency_checks() -> tuple[bool, bool]:
             from sqlalchemy import func, select
             from sqlalchemy.ext.asyncio import async_sessionmaker
 
-            from agent_observatory.db.models import User, WorkerHeartbeat
+            from agent_observatory.db.models import WorkerHeartbeat
             from agent_observatory.db.session import get_engine
 
-            database_ok = False
-            admin_ok = heartbeat_ok = False
+            database_ok = heartbeat_ok = False
             try:
                 database_ok = await ping_database()
                 factory = async_sessionmaker(get_engine(), expire_on_commit=False)
                 async with factory() as db:
-                    admin_ok = bool(
-                        await db.scalar(
-                            select(func.count())
-                            .select_from(User)
-                            .where(User.is_active.is_(True))
-                        )
-                    )
                     fresh_after = datetime.now(UTC) - timedelta(
                         seconds=max(settings().worker_heartbeat_interval * 3, 30)
                     )
@@ -695,11 +725,10 @@ class Supervisor:
                 database_ok = False
             finally:
                 await reset_engine()
-            return database_ok, admin_ok, heartbeat_ok
+            return database_ok, heartbeat_ok
 
-        database_ok, admin_ok, heartbeat_ok = asyncio.run(dependency_checks())
+        database_ok, heartbeat_ok = asyncio.run(dependency_checks())
         checks["postgresql"] = {"ok": database_ok}
-        checks["administrator"] = {"ok": admin_ok}
         supervisor_running = read_supervisor_pid(self.home) is not None
         checks["worker_heartbeat"] = {
             "ok": heartbeat_ok or not supervisor_running,

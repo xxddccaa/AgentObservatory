@@ -33,14 +33,13 @@ async def test_supervisor_applies_a_retention_purge_command(
             db,
             selection=selection,
             plan_obj=planned,
-            principal_id="admin-1",
             scope="raw+index",
         )
         command = SystemCommand(
             command_type="retention.purge",
             component=None,
             target_instance=supervisor_instance_id(home),
-            requested_by="admin-1",
+            requested_by="local",
             payload={"run_id": run.id},
         )
         db.add(command)

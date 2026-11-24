@@ -24,6 +24,8 @@ AGENT_LAYOUTS: dict[str, list[str]] = {
     "opencode": ["~/.local/share/opencode", "~/.config/opencode"],
     "pi": ["~/.pi/agent/sessions", "~/.stepgo/agents/pi/sessions"],
     "xdcode": ["~/.xdcode/sessions", "~/.xdcode/archived_sessions"],
+    "agy": ["~/.gemini/antigravity-cli/brain"],
+    "gemini": ["~/.gemini/tmp"],
     # Only the host's own run logs.  ``~/.stepgo/agents/*`` is intentionally
     # absent: those paths are normally symlinks to the native agent roots and
     # labelling the files as StepGo sessions would misclassify and double-index.
@@ -43,6 +45,8 @@ IMPLEMENTED_AGENTS: frozenset[str] = frozenset(
         "pi",
         "xdcode",
         "stepgo",
+        "agy",
+        "gemini",
     }
 )
 

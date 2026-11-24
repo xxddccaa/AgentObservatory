@@ -1,20 +1,19 @@
 """FastAPI application.
 
-Phase 1 adds the auth surface on top of the Phase 0 health check:
-
 - request-id middleware stamps every request with a correlation id (used by
   `audit_logs.request_id`).
-- startup role seed guarantees `admin`/`operator`/`viewer` always resolve.
-- auth router (`/api/auth/*`) and admin router (`/api/admin/*`).
+- access guard: there is no login (single local user), so the API protects
+  itself with a Host allowlist (DNS rebinding) and a same-origin check on
+  every state-changing request (cross-site request forgery).
 
-All later routers mount here as they land.
+All routers mount here.
 """
 from __future__ import annotations
 
 import logging
 import uuid
-from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -23,37 +22,77 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 
 from agent_observatory import __version__
-from agent_observatory.api import admin as admin_api
 from agent_observatory.api import audit as audit_api
-from agent_observatory.api import auth as auth_api
 from agent_observatory.api import history as history_api
 from agent_observatory.api import insights as insights_api
 from agent_observatory.api import memories as memories_api
 from agent_observatory.api import projects as projects_api
 from agent_observatory.api import retention as retention_api
-from agent_observatory.api import stats as stats_api
 from agent_observatory.api import system as system_api
 from agent_observatory.api.health import router as health_router
-from agent_observatory.config import settings
-from agent_observatory.db.session import get_engine
+from agent_observatory.config import Settings, settings
 
 logger = logging.getLogger(__name__)
 
+#: Methods that never change state; everything else must be same-origin.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Seed baseline roles at startup so RBAC checks never hit a missing row.
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy.orm import sessionmaker
 
-    engine = get_engine()
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        from agent_observatory.services import users
+def _hostname(value: str | None) -> str | None:
+    """Lower-cased host of a ``Host`` header value (port and brackets dropped)."""
+    if not value:
+        return None
+    try:
+        return urlsplit(f"//{value}").hostname
+    except ValueError:
+        return None
 
-        await users.seed_roles(session)
-        await session.commit()
-    yield
+
+def allowed_host_names(config: Settings) -> frozenset[str] | None:
+    """Host names the API answers to; ``None`` accepts any.
+
+    Bound to loopback (the default), only loopback names are accepted, so a
+    web page that rebinds its own domain to 127.0.0.1 cannot read the API.
+    ``AGENT_OBS_ALLOWED_HOSTS`` adds names (``*`` accepts all); with no list,
+    a non-loopback bind such as ``0.0.0.0`` is an explicit choice to serve the
+    network and accepts any name.
+    """
+    explicit = {name.strip().lower() for name in config.allowed_hosts}
+    if "*" in explicit:
+        return None
+    if explicit:
+        return frozenset(explicit | _LOOPBACK_NAMES)
+    bind = config.host.strip().lower().strip("[]")
+    if bind in _LOOPBACK_NAMES or bind.startswith("127."):
+        return _LOOPBACK_NAMES
+    return None
+
+
+def cross_site_reason(method: str, host: str | None, headers) -> str | None:
+    """Why a state-changing request must be refused, or ``None``.
+
+    Browsers attach ``Origin`` to every cross-origin POST/PUT/PATCH/DELETE, so
+    a request whose origin is not this very host:port came from another site.
+    Requests without ``Origin`` (curl, the CLI) are accepted unless the
+    browser marked them ``Sec-Fetch-Site: cross-site``.
+    """
+    if method.upper() in _SAFE_METHODS:
+        return None
+    origin = headers.get("origin")
+    if origin is not None:
+        if origin == "null":
+            return "opaque origin"
+        try:
+            netloc = urlsplit(origin).netloc.lower()
+        except ValueError:
+            return "malformed origin"
+        if not host or netloc != host.lower():
+            return "cross-origin request"
+        return None
+    if (headers.get("sec-fetch-site") or "").lower() == "cross-site":
+        return "cross-site request"
+    return None
 
 
 def create_app() -> FastAPI:
@@ -63,7 +102,6 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         redirect_slashes=False,
-        lifespan=lifespan,
     )
 
     def error_response(
@@ -90,7 +128,6 @@ def create_app() -> FastAPI:
     async def http_error(request: Request, exc: HTTPException):
         code = {
             400: "bad_request",
-            401: "authentication_required",
             403: "permission_denied",
             404: "not_found",
             409: "conflict",
@@ -146,6 +183,39 @@ def create_app() -> FastAPI:
         )
 
     @app.middleware("http")
+    async def access_guard(request: Request, call_next):
+        config = settings()
+        host = request.headers.get("host")
+        allowed = allowed_host_names(config)
+        if allowed is not None and _hostname(host) not in allowed:
+            logger.warning("refused request for host %r path=%s", host, request.url.path)
+            return error_response(
+                request,
+                status_code=403,
+                code="host_not_allowed",
+                message=(
+                    "This host name is not allowed. Open the observatory via 127.0.0.1 or "
+                    "localhost, or list the name in AGENT_OBS_ALLOWED_HOSTS."
+                ),
+            )
+        reason = cross_site_reason(request.method, host, request.headers)
+        if reason is not None:
+            logger.warning(
+                "refused %s %s: %s (origin=%r)",
+                request.method,
+                request.url.path,
+                reason,
+                request.headers.get("origin"),
+            )
+            return error_response(
+                request,
+                status_code=403,
+                code="cross_origin_refused",
+                message="State-changing requests must come from the observatory itself.",
+            )
+        return await call_next(request)
+
+    @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
         request.state.request_id = request_id
@@ -158,13 +228,10 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(health_router, prefix="/api", tags=["health"])
-    app.include_router(auth_api.router, tags=["auth"])
-    app.include_router(admin_api.router, tags=["admin"])
     app.include_router(history_api.router, tags=["codex-history"])
     app.include_router(insights_api.router, tags=["insights"])
     app.include_router(memories_api.router, tags=["memories"])
     app.include_router(projects_api.router, tags=["projects"])
-    app.include_router(stats_api.router, tags=["stats"])
     app.include_router(audit_api.router, tags=["audit"])
     app.include_router(system_api.router, tags=["system"])
     app.include_router(retention_api.router, tags=["retention"])

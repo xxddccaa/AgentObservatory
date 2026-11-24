@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { get, post, ApiError, onUnauthorized } from "../api/client";
+import { get, post } from "../api/client";
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -46,24 +46,6 @@ describe("api client", () => {
       requestId: "req-123",
       retryable: true,
     });
-  });
-
-  it("fires unauthorized handlers on 401", async () => {
-    const handler = vi.fn();
-    const off = onUnauthorized(handler);
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(401, { detail: "nope" })));
-    await expect(get("/api/x")).rejects.toBeInstanceOf(ApiError);
-    expect(handler).toHaveBeenCalledOnce();
-    off();
-  });
-
-  it("suppresses the unauthorized handler when asked", async () => {
-    const handler = vi.fn();
-    const off = onUnauthorized(handler);
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(401, {})));
-    await expect(get("/api/x", { suppressAuthHandler: true })).rejects.toBeInstanceOf(ApiError);
-    expect(handler).not.toHaveBeenCalled();
-    off();
   });
 
   it("wraps network failures as ApiError status 0", async () => {

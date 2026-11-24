@@ -8,8 +8,6 @@ from sqlalchemy import select
 
 from agent_observatory.api.deps import (
     DB,
-    CurrentPrincipal,
-    OperatorPrincipal,
     _client_ip,
     _user_agent,
 )
@@ -40,7 +38,6 @@ async def _entry(db: DB, entry_id: str) -> MemoryEntry:
 async def _record_action(
     db: DB,
     request: Request,
-    principal,
     *,
     action: str,
     resource_id: str,
@@ -49,7 +46,6 @@ async def _record_action(
     await audit.record(
         db,
         action=action,
-        actor_id=principal.user_id,
         resource_type="memory_entry",
         resource_id=resource_id,
         request_id=getattr(request.state, "request_id", None),
@@ -62,7 +58,6 @@ async def _record_action(
 @router.get("")
 async def list_memories(
     db: DB,
-    principal: CurrentPrincipal,
     limit: int = Query(100, ge=1, le=200),
     cursor: str | None = None,
     q: str | None = None,
@@ -71,7 +66,6 @@ async def list_memories(
     workspace_id: str | None = None,
     include_missing: bool = False,
 ):
-    del principal
     try:
         return await memories.list_entries(
             db,
@@ -88,8 +82,7 @@ async def list_memories(
 
 
 @router.get("/sources")
-async def memory_sources(db: DB, principal: CurrentPrincipal):
-    del principal
+async def memory_sources(db: DB):
     return await memories.source_status(db)
 
 
@@ -98,14 +91,12 @@ async def memory_detail(
     entry_id: str,
     request: Request,
     db: DB,
-    principal: CurrentPrincipal,
 ):
     row = await _entry(db, entry_id)
     workspace = await memories.get_workspace(db, row.workspace_id)
     await _record_action(
         db,
         request,
-        principal,
         action="memory.viewed",
         resource_id=row.id,
         detail={
@@ -123,7 +114,6 @@ async def memory_content(
     payload: ContentRequest,
     request: Request,
     db: DB,
-    principal: OperatorPrincipal,
 ):
     row = await _entry(db, entry_id)
     content = (
@@ -134,7 +124,6 @@ async def memory_content(
     await _record_action(
         db,
         request,
-        principal,
         action=(
             "memory.content_revealed"
             if payload.purpose == "reveal"
@@ -161,7 +150,6 @@ async def export_memories(
     payload: ExportRequest,
     request: Request,
     db: DB,
-    principal: OperatorPrincipal,
 ):
     rows = list(
         (
@@ -185,7 +173,6 @@ async def export_memories(
     await audit.record(
         db,
         action="memory.exported",
-        actor_id=principal.user_id,
         resource_type="memory_entries",
         resource_id=",".join(payload.ids),
         request_id=getattr(request.state, "request_id", None),

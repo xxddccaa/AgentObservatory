@@ -31,8 +31,6 @@
             <small>{{ online ? "Services operational" : "Attention required" }}</small>
           </span>
         </span>
-
-        <UserMenu />
       </div>
     </aside>
 
@@ -42,7 +40,7 @@
           <strong>{{ healthProblem.title }}</strong>
           <span>{{ healthProblem.detail }}</span>
         </div>
-        <router-link v-if="auth.isAdmin" to="/system">Open System</router-link>
+        <router-link v-if="!apiOffline" to="/system">Open System</router-link>
         <button v-else type="button" @click="tick">Retry</button>
       </aside>
 
@@ -68,11 +66,8 @@ import {
   ShieldCheck,
   Telescope,
 } from "@lucide/vue";
-import { useAuthStore } from "../stores/auth";
 import { getReadyHealth, type ReadyHealth } from "../api/health";
-import UserMenu from "./UserMenu.vue";
 
-const auth = useAuthStore();
 const route = useRoute();
 
 interface NavItem {
@@ -82,8 +77,8 @@ interface NavItem {
   match: string;
 }
 
-const navItems = computed<NavItem[]>(() => {
-  const items: NavItem[] = [
+// Single local user: every page is available, there are no roles.
+const navItems = computed<NavItem[]>(() => [
     { to: "/", label: "Dashboard", icon: Gauge, match: "dashboard" },
     { to: "/history", label: "History", icon: History, match: "history" },
     { to: "/memories", label: "Memories", icon: BrainCircuit, match: "memories" },
@@ -91,15 +86,9 @@ const navItems = computed<NavItem[]>(() => {
     { to: "/insights", label: "Insights", icon: ChartNoAxesCombined, match: "insights" },
     { to: "/guide", label: "使用方法", icon: BookOpen, match: "guide" },
     { to: "/audit", label: "Audit", icon: ShieldCheck, match: "audit" },
-  ];
-  if (auth.canOperate) {
-    items.push({ to: "/storage", label: "Storage", icon: HardDrive, match: "storage" });
-  }
-  if (auth.isAdmin) {
-    items.push({ to: "/system", label: "System", icon: ServerCog, match: "system" });
-  }
-  return items;
-});
+    { to: "/storage", label: "Storage", icon: HardDrive, match: "storage" },
+    { to: "/system", label: "System", icon: ServerCog, match: "system" },
+]);
 
 function isActive(item: NavItem): boolean {
   const name = String(route.name ?? "");
@@ -451,9 +440,6 @@ onBeforeUnmount(() => {
   }
   .shell__env-copy {
     display: none;
-  }
-  .shell__rail-footer :deep(.usermenu) {
-    grid-column: 5;
   }
   .shell__content {
     min-height: calc(100dvh - 112px);

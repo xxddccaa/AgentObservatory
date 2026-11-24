@@ -194,10 +194,8 @@
           <input v-model="acknowledged" type="checkbox" />
           本次超过 {{ formatBytes(preview.large_run_bytes) }}，我确认继续
         </label>
-        <p v-if="!auth.isAdmin" class="muted">只有 admin 可以发起清理。</p>
-        <p v-else class="muted">删除不可撤销，请确认上方数字无误。</p>
+        <p class="muted">删除不可撤销，请确认上方数字无误。</p>
         <button
-          v-if="auth.isAdmin"
           class="danger-btn"
           type="button"
           :disabled="!canDelete"
@@ -277,7 +275,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { RefreshCw, Trash2 } from "@lucide/vue";
-import { useAuthStore } from "../stores/auth";
 import { agentLabel } from "../constants/agents";
 import {
   createRetentionRun,
@@ -294,8 +291,6 @@ import {
   type RetentionRisk,
   type RetentionRun,
 } from "../api/retention";
-
-const auth = useAuthStore();
 
 const loading = ref(false);
 const previewing = ref(false);
@@ -372,7 +367,7 @@ const needsAcknowledgement = computed(() => {
 });
 
 const canDelete = computed(() => {
-  if (!auth.isAdmin || !preview.value || deleting.value) return false;
+  if (!preview.value || deleting.value) return false;
   if (preview.value.totals.files === 0 && preview.value.totals.sessions === 0) return false;
   if (needsAcknowledgement.value && !acknowledged.value) return false;
   return true;

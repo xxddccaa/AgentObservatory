@@ -1,5 +1,4 @@
 import { createApp, nextTick } from "vue";
-import { createPinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -34,7 +33,6 @@ async function mountDashboard() {
   await router.push("/");
   await router.isReady();
   const app = createApp(Dashboard);
-  app.use(createPinia());
   app.use(router);
   app.mount(root);
   await flush();

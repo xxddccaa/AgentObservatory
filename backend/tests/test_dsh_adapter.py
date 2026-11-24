@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from agent_observatory.db.models import AgentEvent, AgentTurn, CodexMessage, ToolCall
 from agent_observatory.workers.indexer.adapters import PlanAction, SourcePlan
-from agent_observatory.workers.indexer.dsh import DshJsonlSource
+from agent_observatory.workers.indexer.adapters.dsh import DshJsonlSource
 
 
 @pytest.mark.asyncio

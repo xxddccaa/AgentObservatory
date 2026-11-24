@@ -2,40 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import AgentEvent, AgentSession, CodexMessage
 
-from .adapters import PlanAction, SourceDescriptor, SourcePlan
-from .tree_cache import cached_resolve, rglob_cached
-
-
-def _id(prefix: str, value: str) -> str:
-    return hashlib.sha256(f"{prefix}:{value}".encode()).hexdigest()[:48]
-
-
-def _ts(value: object) -> datetime | None:
-    try:
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value / 1000 if value > 1e11 else value, tz=UTC)
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def _pg_safe(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.replace("\x00", "\\u0000")
-    if isinstance(value, dict):
-        return {str(_pg_safe(key)): _pg_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_pg_safe(item) for item in value]
-    return value
+from ..tree_cache import cached_resolve, rglob_cached
+from .base import SourceDescriptor, SourcePlan
+from .common import (
+    MAX_LINE_BYTES,
+    clear_session_rows,
+    parse_ts,
+    pg_safe,
+    plan_stat_rebuild,
+    stable_id,
+)
 
 
 class GenericJsonlSource:
@@ -62,35 +46,24 @@ class GenericJsonlSource:
         ]
 
     def plan(self, source: SourceDescriptor, checkpoint: Any | None = None) -> SourcePlan:
-        st = source.path.stat()
-        fp = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "path": str(source.path.resolve())}
-        if checkpoint is None or getattr(checkpoint, "parser_version", None) != self.parser_version:
-            return SourcePlan(source, PlanAction.REBUILD, fp)
-        prev = getattr(checkpoint, "fingerprint_json", {}) or {}
-        if (
-            getattr(checkpoint, "status", None) == "indexed"
-            and prev.get("size") == st.st_size
-            and prev.get("mtime_ns") == st.st_mtime_ns
-        ):
-            return SourcePlan(source, PlanAction.UNCHANGED, fp)
-        return SourcePlan(source, PlanAction.REBUILD, fp)
+        return plan_stat_rebuild(source, checkpoint, self.parser_version)
 
     def _iter(self, path):
         with path.open("rb") as fh:
             while True:
-                raw = fh.readline(8 * 1024 * 1024 + 1)
+                raw = fh.readline(MAX_LINE_BYTES + 1)
                 if not raw:
                     return
-                if len(raw) > 8 * 1024 * 1024 and not raw.endswith(b"\n"):
+                if len(raw) > MAX_LINE_BYTES and not raw.endswith(b"\n"):
                     while raw and not raw.endswith(b"\n"):
-                        raw = fh.readline(8 * 1024 * 1024 + 1)
+                        raw = fh.readline(MAX_LINE_BYTES + 1)
                     continue
                 if raw.endswith(b"\n"):
                     yield raw[:-1]
 
     async def ingest(self, db: AsyncSession, plan: SourcePlan) -> AgentSession:
         src = plan.source
-        sid = _id("session", src.identity)
+        sid = stable_id("session", src.identity)
         session = await db.scalar(
             select(AgentSession).where(AgentSession.source_identity == src.identity)
         )
@@ -111,10 +84,7 @@ class GenericJsonlSource:
             db.add(session)
             await db.flush()
         else:
-            await db.execute(
-                delete(CodexMessage).where(CodexMessage.agent_session_id == session.id)
-            )
-            await db.execute(delete(AgentEvent).where(AgentEvent.agent_session_id == session.id))
+            await clear_session_rows(db, session.id)
         first_user = None
         seq = 0
         start = end = None
@@ -132,9 +102,9 @@ class GenericJsonlSource:
             if not isinstance(obj, dict):
                 obj = {"type": "raw", "value": obj}
                 known = False
-            obj = _pg_safe(obj)
+            obj = pg_safe(obj)
             typ = str(obj.get("type") or obj.get("event") or "unknown")
-            ts = _ts(obj.get("timestamp") or obj.get("time") or obj.get("created_at"))
+            ts = parse_ts(obj.get("timestamp") or obj.get("time") or obj.get("created_at"))
             ev = AgentEvent(
                 agent_session_id=session.id,
                 event_index=seq,
@@ -164,7 +134,7 @@ class GenericJsonlSource:
                 first_user = first_user or (text if role == "user" else None)
                 db.add(
                     CodexMessage(
-                        id=_id("msg", f"{session.id}:{seq}"),
+                        id=stable_id("msg", f"{session.id}:{seq}"),
                         agent_session_id=session.id,
                         event_id=ev.id,
                         role=role,

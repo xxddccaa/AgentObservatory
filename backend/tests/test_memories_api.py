@@ -63,17 +63,17 @@ async def _seed_memory(
 
 @pytest.mark.anyio
 async def test_memory_list_and_detail_redact_sensitive_content(
-    as_viewer, db_session
+    client, db_session
 ) -> None:
     row = await _seed_memory(db_session)
-    response = await as_viewer.get("/api/memories")
+    response = await client.get("/api/memories")
     assert response.status_code == 200
     item = response.json()["entries"][0]
     assert item["id"] == row.id
     assert "super-secret-value" not in item["summary"]
     assert item["sensitivity"] == "sensitive"
 
-    detail = await as_viewer.get(f"/api/memories/{row.id}")
+    detail = await client.get(f"/api/memories/{row.id}")
     assert detail.status_code == 200
     body = detail.json()
     assert body["content_redacted"] is True
@@ -86,23 +86,10 @@ async def test_memory_list_and_detail_redact_sensitive_content(
 
 
 @pytest.mark.anyio
-async def test_full_content_requires_operator_and_is_audited(
-    client, as_viewer, operator_user, db_session
+async def test_full_content_copy_is_audited_without_the_body(
+    client, db_session
 ) -> None:
     row = await _seed_memory(db_session)
-    denied = await as_viewer.post(
-        f"/api/memories/{row.id}/content",
-        json={"format": "raw", "purpose": "copy"},
-    )
-    assert denied.status_code == 403
-
-    await client.post(
-        "/api/auth/login",
-        json={
-            "username": operator_user["username"],
-            "password": "operator-password-123",
-        },
-    )
     copied = await client.post(
         f"/api/memories/{row.id}/content",
         json={"format": "raw", "purpose": "copy"},
@@ -118,11 +105,11 @@ async def test_full_content_requires_operator_and_is_audited(
 
 
 @pytest.mark.anyio
-async def test_operator_can_export_portable_zip(
-    as_operator, db_session
+async def test_export_portable_zip(
+    client, db_session
 ) -> None:
     row = await _seed_memory(db_session, sensitive=False)
-    response = await as_operator.post(
+    response = await client.post(
         "/api/memories/export",
         json={"ids": [row.id], "format": "zip", "target": "claude"},
     )
@@ -143,10 +130,10 @@ async def test_operator_can_export_portable_zip(
 
 @pytest.mark.anyio
 async def test_memory_sources_include_unsupported_agents(
-    as_viewer, db_session
+    client, db_session
 ) -> None:
     await _seed_memory(db_session, sensitive=False)
-    response = await as_viewer.get("/api/memories/sources")
+    response = await client.get("/api/memories/sources")
     assert response.status_code == 200
     sources = {item["agent"]: item for item in response.json()["sources"]}
     assert sources["claude"]["status"] == "indexed"

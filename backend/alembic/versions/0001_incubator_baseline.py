@@ -17,12 +17,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    metadata.create_all(bind=bind, checkfirst=False)
-    bind.exec_driver_sql(
-        "INSERT INTO roles (name) VALUES ('admin'), ('operator'), ('viewer')"
-    )
+    # The account tables (users / roles / sessions / api_tokens) left the
+    # metadata with 0016; a fresh database never creates them.
+    metadata.create_all(bind=op.get_bind(), checkfirst=False)
 
 
 def downgrade() -> None:
     metadata.drop_all(bind=op.get_bind(), checkfirst=True)
+    # Left behind by 0016's downgrade on databases that once had accounts.
+    op.execute("DROP TABLE IF EXISTS api_tokens, sessions, user_roles, roles, users CASCADE")

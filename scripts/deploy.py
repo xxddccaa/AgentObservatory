@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""Deploy a shared checkout into an isolated, machine-local /root directory."""
+"""Deploy a shared checkout into an isolated, machine-local runtime directory.
+
+Two profiles share every step:
+
+* ``root`` (Linux servers, the reference profile): runs as root, everything
+  lives below ``/root/.agent-observatory`` and PostgreSQL 16 runs as the
+  ``postgres`` account with ACL-granted traversal.
+* ``user`` (macOS workstations without root): everything lives below
+  ``~/.agent-observatory`` and the dedicated PostgreSQL (Homebrew 16 or newer)
+  runs as the invoking user, still loopback-only on its own port.
+"""
 from __future__ import annotations
 
 import argparse
 import fcntl
-import getpass
+import ipaddress
 import json
 import os
 import pwd
@@ -41,6 +51,30 @@ POSTGRES_RESTART_SETTINGS = ("shared_buffers", "max_connections")
 _SETTING_VALUE = re.compile(r"[A-Za-z0-9_.]+")
 
 
+def deployment_profile() -> str:
+    """``user`` on macOS without root, otherwise the reference ``root`` profile."""
+    return "user" if sys.platform == "darwin" and os.geteuid() != 0 else "root"
+
+
+PROFILE = deployment_profile()
+#: Homebrew prefixes searched for ``postgresql@<major>`` in the user profile.
+HOMEBREW_PREFIXES = (Path("/opt/homebrew/opt"), Path("/usr/local/opt"))
+POSTGRES_MAJORS = ("16", "17", "18")
+
+
+def default_home() -> str:
+    if PROFILE == "user":
+        return str(Path.home() / ".agent-observatory")
+    return "/root/.agent-observatory"
+
+
+def as_postgres(command: list[str]) -> list[str]:
+    """Run a PostgreSQL server command as the account that owns the cluster."""
+    if PROFILE == "user":
+        return command
+    return ["runuser", "-u", "postgres", "--", *command]
+
+
 def run(command: list[str], *, cwd: Path | None = None, env: dict | None = None,
         input_text: str | None = None, capture: bool = False) -> str:
     result = subprocess.run(
@@ -50,10 +84,11 @@ def run(command: list[str], *, cwd: Path | None = None, env: dict | None = None,
     return result.stdout.strip() if capture else ""
 
 
-def local_home(value: str) -> Path:
+def local_home(value: str, profile: str | None = None) -> Path:
+    base = Path.home().resolve() if (profile or PROFILE) == "user" else Path("/root")
     home = Path(value).expanduser().resolve()
-    if home == Path("/root") or not home.is_relative_to(Path("/root")):
-        raise ValueError("AGENT_OBS_HOME must be a dedicated directory under /root")
+    if home == base or not home.is_relative_to(base):
+        raise ValueError(f"AGENT_OBS_HOME must be a dedicated directory under {base}")
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     return home
 
@@ -108,6 +143,28 @@ def read_config(path: Path) -> dict[str, str]:
     return values
 
 
+def listen_host(value: str | None) -> str:
+    """API listen address for a new config: loopback unless asked otherwise.
+
+    There is no login, so a non-loopback address (e.g. ``0.0.0.0``) lets
+    anyone who can reach the port read every indexed session.
+    """
+    host = (value or "127.0.0.1").strip()
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        if host != "localhost":
+            raise ValueError(f"AGENT_OBS_HOST must be an IP address or localhost, not {host!r}") from None
+        return host
+    if not address.is_loopback:
+        print(
+            f"WARNING: the API will listen on {host} without login; anyone who can reach "
+            "this port can read every indexed agent session.",
+            file=sys.stderr,
+        )
+    return host
+
+
 def configure(home: Path) -> dict[str, str]:
     path = home / "config.env"
     if path.exists():
@@ -118,14 +175,11 @@ def configure(home: Path) -> dict[str, str]:
     values = {
         "AGENT_OBS_HOME": str(home),
         "AGENT_OBS_ENVIRONMENT": "production",
-        "AGENT_OBS_HOST": "127.0.0.1",
+        "AGENT_OBS_HOST": listen_host(os.environ.get("AGENT_OBS_HOST")),
         "AGENT_OBS_PORT": "8125",
         "AGENT_OBS_DATABASE_URL": f"postgresql+asyncpg://observatory:{password}@127.0.0.1:{port}/agent_observatory",
-        "AGENT_OBS_SESSION_SECRET": secrets.token_urlsafe(48),
-        "AGENT_OBS_API_TOKEN_SECRET": secrets.token_urlsafe(48),
-        "AGENT_OBS_BOOTSTRAP_TOKEN": "",
+        "AGENT_OBS_SIGNING_SECRET": secrets.token_urlsafe(48),
         "AGENT_OBS_RETENTION_ENABLED": "false",
-        "AGENT_OBS_ADMIN_USERNAME": "admin",
     }
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as handle:
@@ -156,9 +210,9 @@ def postgres_settings(config: dict[str, str]) -> dict[str, str]:
 
 def superuser_psql(home: Path, config: dict[str, str], binaries: Path) -> list[str]:
     port = urlparse(config["AGENT_OBS_DATABASE_URL"]).port
-    return ["runuser", "-u", "postgres", "--", str(binaries / "psql"), "-X", "-qAt",
-            "-v", "ON_ERROR_STOP=1", "-h", str(home / "postgresql" / "run"),
-            "-p", str(port), "-d", "postgres"]
+    return as_postgres([str(binaries / "psql"), "-X", "-qAt",
+                        "-v", "ON_ERROR_STOP=1", "-h", str(home / "postgresql" / "run"),
+                        "-p", str(port), "-d", "postgres"])
 
 
 def tune_postgresql(home: Path, config: dict[str, str], binaries: Path) -> bool:
@@ -183,41 +237,79 @@ def tune_postgresql(home: Path, config: dict[str, str], binaries: Path) -> bool:
 def restart_postgresql(home: Path, binaries: Path) -> None:
     postgres = home / "postgresql"
     print("Restarting machine-local PostgreSQL to apply memory settings", flush=True)
-    run(["runuser", "-u", "postgres", "--", str(binaries / "pg_ctl"), "-D", str(postgres / "data"),
-         "-l", str(postgres / "logs" / "startup.log"), "-m", "fast", "-w", "restart"], cwd=postgres)
+    run(as_postgres([str(binaries / "pg_ctl"), "-D", str(postgres / "data"),
+                     "-l", str(postgres / "logs" / "startup.log"), "-m", "fast", "-w", "restart"]),
+        cwd=postgres)
+
+
+def postgres_binaries(home: Path, config: dict[str, str]) -> Path:
+    """PostgreSQL executables: explicit setting, else the profile default.
+
+    The user profile prefers the Homebrew major that initialized the existing
+    cluster, so installing another major later never picks incompatible
+    binaries for the data directory.
+    """
+    explicit = os.environ.get("AGENT_OBS_PG_BIN") or config.get("AGENT_OBS_PG_BIN")
+    if explicit:
+        return Path(explicit)
+    if PROFILE == "root":
+        return Path("/usr/lib/postgresql/16/bin")
+    version_file = home / "postgresql" / "data" / "PG_VERSION"
+    majors = (version_file.read_text().strip(),) if version_file.is_file() else POSTGRES_MAJORS
+    for major in majors:
+        for prefix in HOMEBREW_PREFIXES:
+            candidate = prefix / f"postgresql@{major}" / "bin"
+            if (candidate / "initdb").is_file():
+                return candidate
+    raise ValueError(
+        f"PostgreSQL {' or '.join(majors)} not found under Homebrew; "
+        "install it (brew install postgresql@16) or set AGENT_OBS_PG_BIN"
+    )
+
+
+def check_node() -> None:
+    version = run(["node", "--version"], capture=True)
+    if PROFILE == "root":
+        if not version.startswith("v22."):
+            raise ValueError("Node 22 is required; put it on PATH")
+        return
+    match = re.match(r"v(\d+)\.", version)
+    if match is None or int(match.group(1)) < 22:
+        raise ValueError("Node 22 or newer is required; put it on PATH")
 
 
 def ensure_postgresql(home: Path, config: dict[str, str]) -> Path:
-    binaries = Path(os.environ.get("AGENT_OBS_PG_BIN", "/usr/lib/postgresql/16/bin"))
+    binaries = postgres_binaries(home, config)
     for executable in ("initdb", "pg_ctl", "psql", "pg_dump"):
         if not (binaries / executable).is_file():
-            raise ValueError(f"PostgreSQL 16 executable missing: {binaries / executable}")
-    for executable in ("runuser", "setfacl", "uv", "node", "npm"):
+            raise ValueError(f"PostgreSQL executable missing: {binaries / executable}")
+    required = ("uv", "node", "npm") if PROFILE == "user" else ("runuser", "setfacl", "uv", "node", "npm")
+    for executable in required:
         if not shutil.which(executable):
             raise ValueError(f"missing deployment dependency: {executable}")
-    if not run(["node", "--version"], capture=True).startswith("v22."):
-        raise ValueError("Node 22 is required; put it on PATH")
+    check_node()
     database_env(config)
-    account = pwd.getpwnam("postgres")
-    for parent in [Path("/root"), *reversed(home.parents), home]:
-        if parent != Path("/root") and not parent.is_relative_to(Path("/root")):
-            continue
-        permissions = "u:postgres:--x,g::---,o::---" if parent == home else "u:postgres:--x"
-        run(["setfacl", "-m", permissions, str(parent)])
     postgres = home / "postgresql"
     postgres.mkdir(exist_ok=True, mode=0o700)
-    os.chown(postgres, account.pw_uid, account.pw_gid)
     postgres.chmod(0o700)
     data, sockets, logs = postgres / "data", postgres / "run", postgres / "logs"
     for directory in (sockets, logs):
         directory.mkdir(exist_ok=True, mode=0o700)
-        os.chown(directory, account.pw_uid, account.pw_gid)
-    prefix = ["runuser", "-u", "postgres", "--"]
+    if PROFILE == "root":
+        account = pwd.getpwnam("postgres")
+        for parent in [Path("/root"), *reversed(home.parents), home]:
+            if parent != Path("/root") and not parent.is_relative_to(Path("/root")):
+                continue
+            permissions = "u:postgres:--x,g::---,o::---" if parent == home else "u:postgres:--x"
+            run(["setfacl", "-m", permissions, str(parent)])
+        for directory in (postgres, sockets, logs):
+            os.chown(directory, account.pw_uid, account.pw_gid)
     if not (data / "PG_VERSION").exists():
         if data.exists() and any(data.iterdir()):
             raise ValueError("refusing to initialize a non-empty PostgreSQL directory")
-        run([*prefix, str(binaries / "initdb"), "-D", str(data),
-             "--auth-local=peer", "--auth-host=scram-sha-256", "--encoding=UTF8"], cwd=postgres)
+        run(as_postgres([str(binaries / "initdb"), "-D", str(data),
+                         "--auth-local=peer", "--auth-host=scram-sha-256", "--encoding=UTF8"]),
+            cwd=postgres)
         port = urlparse(config["AGENT_OBS_DATABASE_URL"]).port
         with (data / "postgresql.conf").open("a") as handle:
             handle.write(
@@ -226,10 +318,11 @@ def ensure_postgresql(home: Path, config: dict[str, str]) -> Path:
                 "logging_collector = on\nlog_directory = '../logs'\n"
                 "log_filename = 'postgresql-%Y-%m-%d.log'\nlog_rotation_age = '1d'\n"
             )
-    status = subprocess.run([*prefix, str(binaries / "pg_ctl"), "-D", str(data), "status"],
+    status = subprocess.run(as_postgres([str(binaries / "pg_ctl"), "-D", str(data), "status"]),
                             cwd=postgres, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     if status.returncode != 0:
-        run([*prefix, str(binaries / "pg_ctl"), "-D", str(data), "-l", str(logs / "startup.log"), "-w", "start"], cwd=postgres)
+        run(as_postgres([str(binaries / "pg_ctl"), "-D", str(data), "-l", str(logs / "startup.log"), "-w", "start"]),
+            cwd=postgres)
     url = urlparse(config["AGENT_OBS_DATABASE_URL"])
     psql = superuser_psql(home, config, binaries)
     username, password = unquote(url.username or ""), unquote(url.password or "")
@@ -250,7 +343,11 @@ def build_env(home: Path) -> dict[str, str]:
     environment.pop("UV_PROJECT_ENVIRONMENT", None)
     environment["UV_CACHE_DIR"] = str(home / "cache" / "uv")
     environment["PYTHONPYCACHEPREFIX"] = str(home / "cache" / "pycache")
-    proxy = os.environ.get("AGENT_OBS_DEPLOY_PROXY") or read_config(home / "config.env").get("AGENT_OBS_DEPLOY_PROXY")
+    if PROFILE == "user":
+        # The project targets Python 3.12; on a workstation uv would otherwise
+        # pick whichever newer interpreter it finds first.
+        environment.setdefault("UV_PYTHON", "3.12")
+    proxy =os.environ.get("AGENT_OBS_DEPLOY_PROXY") or read_config(home / "config.env").get("AGENT_OBS_DEPLOY_PROXY")
     if proxy:
         environment["npm_config_proxy"] = proxy
         environment["npm_config_https_proxy"] = proxy
@@ -320,24 +417,6 @@ def activate(release: Path, home: Path, config: dict[str, str], binaries: Path,
             restart_postgresql(home, binaries)
         run([str(python), "-m", "alembic", "upgrade", "head"], cwd=release / "backend", env=environment)
         run([str(python), "-m", "alembic", "check"], cwd=release / "backend", env=environment)
-        credentials = read_config(home / "credentials.env")
-        password = os.environ.get("AGENT_OBS_ADMIN_PASSWORD") or credentials.get("AGENT_OBS_ADMIN_PASSWORD")
-        has_users = run([str(binaries / "psql"), *connection, "-d", "agent_observatory", "-XAtc", "SELECT count(*) FROM users"], env=db_environment, capture=True) != "0"
-        if not has_users and not password:
-            if not sys.stdin.isatty():
-                raise ValueError("set AGENT_OBS_ADMIN_PASSWORD for the initial administrator")
-            password = getpass.getpass("Initial admin password: ")
-            if password != getpass.getpass("Repeat initial admin password: "):
-                raise ValueError("administrator passwords do not match")
-        if not has_users:
-            environment["AGENT_OBS_ADMIN_USERNAME"] = "admin"
-            environment["AGENT_OBS_ADMIN_PASSWORD"] = password
-            run([str(python), "-c", "from agent_observatory.cli import _run_async, _ensure_initial_admin; raise SystemExit(_run_async(_ensure_initial_admin()))"], env=environment)
-            credential_path = home / "credentials.env"
-            descriptor = os.open(credential_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w") as handle:
-                handle.write(f"AGENT_OBS_ADMIN_PASSWORD={shlex.quote(password)}\n")
-            credential_path.chmod(0o600)
         switch_release(home, release)
         cli(release, home, ["up"])
         cli(release, home, ["status", "--json"])
@@ -394,9 +473,9 @@ def main() -> int:
     parser.add_argument("--start-only", action="store_true")
     parser.add_argument("--release", type=Path)
     arguments = parser.parse_args()
-    if os.geteuid() != 0:
+    if PROFILE == "root" and os.geteuid() != 0:
         raise ValueError("this deployment profile must run as root")
-    home = local_home(os.environ.get("AGENT_OBS_HOME", "/root/.agent-observatory"))
+    home = local_home(os.environ.get("AGENT_OBS_HOME") or default_home())
     (home / "run").mkdir(exist_ok=True)
     with (home / "run" / "deploy.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

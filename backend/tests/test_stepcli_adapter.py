@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from agent_observatory.db.models import AgentEvent, AgentTurn, CodexMessage
 from agent_observatory.workers.indexer.adapters import PlanAction
-from agent_observatory.workers.indexer.stepcli import StepCliNativeSource
+from agent_observatory.workers.indexer.adapters.stepcli import StepCliNativeSource
 
 
 def _write_session(root: Path, session_id: str = "native-1") -> Path:

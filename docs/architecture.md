@@ -6,10 +6,10 @@ durable source of truth. Original agent files are never modified.
 ```text
 Browser (Vue 3 + Vite)
         │ same-origin HTTP
-FastAPI (auth/RBAC, history, insights, audit, system)
+FastAPI (access guard, history, insights, audit, system)
         │
         └── PostgreSQL
-              users, roles, audit_logs, agent_sessions
+              audit_logs, agent_sessions
               agent_events, agent_turns, messages, tool_calls
               local_data_sources, evidence/activity/skills/thread tables
               memory_entries
@@ -29,6 +29,9 @@ Read-only local roots
   ~/.dsh/sessions/**/session.jsonl.zstd
                                       dsh_jsonl (agent=dsh)
   ~/.local/share/opencode/**       opencode_json (agent=opencode)
+  ~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl
+                                      agy_jsonl (agent=agy)
+  ~/.gemini/tmp/*/chats/**          gemini_jsonl (agent=gemini)
   configured extra roots           generic_jsonl (agent=generic)
 
 MemoryIndexer
@@ -57,6 +60,44 @@ Memory sources are indexed independently from session adapters. SQLite
 memory directories accept regular `.md` and `.txt` files only and never follow
 symbolic links. Missing source entries remain in PostgreSQL with
 `is_present=false` so disappearance is auditable.
+
+### Antigravity CLI (agy)
+
+agy writes one append-only `transcript_full.jsonl` per conversation (one JSON
+record per trajectory step: `USER_INPUT`, `PLANNER_RESPONSE`, `GENERIC`,
+`SYSTEM_MESSAGE`). Result steps carry no call id; agy writes one `GENERIC` step
+per tool call of the preceding `PLANNER_RESPONSE`, in call order, so results
+are paired positionally (verified against the call ids agy stores in its
+protobuf `conversations/<id>.db`). New lines are read from the stored byte
+offset and folded into the existing projection; the pending-call queue, the
+open turn and the message sequence are read back from PostgreSQL, so an
+append never rebuilds the session. Unknown step types and unparseable lines
+stay in `agent_events` with `is_known=false`.
+
+Title, workspace and parent conversation come from agy's own index
+`conversation_summaries.db`, re-read only when its signature changes. While
+no `-wal` exists it is opened with `immutable=1`, which creates no side
+files; the signature is compared before and after the read and a read that
+raced a writer is discarded. `conversation_summaries.db` and its `-wal` are
+`watch_paths` of every agy source, so a title generated after the last
+transcript line still reaches the session. agy checkpoints keep the size/mtime
+seen while planning (like Pi), so a line appended during an ingest is picked
+up on the next poll.
+
+### Gemini CLI (gemini)
+
+Gemini CLI stores project paths in `~/.gemini/projects.json` and per-project
+chats under `~/.gemini/tmp/<slug>/chats/` (`session-*.jsonl`, legacy
+`session-*.json`, and `<parentSessionId>/<subagentSessionId>.jsonl` subagents;
+unrelated sibling directories like `background-processes` are ignored).
+`ChatRecordingService` writes event-sourced JSONL lines: repeated snapshots
+sharing the same message `id` as thoughts/tokens/tool calls evolve, plus
+`$set`, `$patch`, and `$rewindTo` mutation records. `GeminiCliSource` appends
+raw `agent_events` incrementally by byte offset with bounded memory and projects
+the deduplicated `messages_map` idempotently while filtering synthetic
+`functionResponse`-only user turns. Workspace resolution combines
+`.project_root`, `projects.json` (`projectHash` / slug lookup), and header
+`directories`, and watches those metadata files via `watch_paths`.
 
 ## Polling And Projection Efficiency
 
@@ -179,7 +220,7 @@ whole child table otherwise. Migration `0010` indexes the two
 `SET NULL` / `CASCADE` referencing columns (`messages.turn_id`,
 `tool_calls.turn_id`, `evidence_records.agent_event_id`,
 `session_skill_evidence.skill_id`, `thread_edges.source_id`,
-`thread_goals.source_id`, `user_roles.role_id`). Before them, deleting one
+`thread_goals.source_id`, and historically `user_roles.role_id` before `0016`). Before them, deleting one
 session's evidence rows took 87s on the dev database because every row
 triggered a sequential scan of `activity_spans`. `0011` drops
 `ix_agent_events_session_event`, which duplicated the
@@ -201,7 +242,7 @@ component.
 `/storage` reclaims disk space from old agent data. The API never deletes:
 `POST /api/retention/preview` inventories files older than the configured
 retention floor and seals the selection into an HMAC plan token;
-`POST /api/retention/runs` (admin) writes an `audit_logs` row and a
+`POST /api/retention/runs` writes an `audit_logs` row and a
 `retention.purge` `system_commands` row; the Supervisor claims that command and
 applies it, deleting files and the matching `agent_sessions` /
 `local_data_sources` rows before recording the freed bytes in `retention_runs`.
@@ -215,8 +256,19 @@ See `docs/retention.md` for the catalog, guards and configuration.
 All user and system control actions write `audit_logs`; system lifecycle
 commands are persisted in `system_commands` before the Supervisor applies
 them. API responses and exports redact secrets while retaining raw-event hashes
-for auditability. Authentication supports session cookies and bearer API
-tokens with admin/operator/viewer RBAC.
+for auditability.
+
+There is no login: the observatory is used by one person on their own
+machine. Accounts, roles, sessions and API tokens were removed (migration
+`0016_drop_accounts`); audit rows record `actor_type = 'local'` for UI/API
+actions. Access is limited by the listen address (`AGENT_OBS_HOST`, default
+`127.0.0.1`) plus an access guard in `main.py`: on a loopback bind only
+loopback `Host` names are answered (a page that rebinds its domain to
+127.0.0.1 cannot read the API), and every non-GET request whose `Origin` is
+not this host:port, or that the browser marks `Sec-Fetch-Site: cross-site`,
+is refused (cross-site request forgery). `AGENT_OBS_ALLOWED_HOSTS` adds names;
+binding `0.0.0.0` is an explicit choice to serve the network and accepts any
+host.
 Memory list and ordinary detail responses redact detected secrets. Revealing,
-copying, and exporting complete memory content requires operator or admin and
+copying, and exporting complete memory content is an explicit action and
 records hashes and entry ids in `audit_logs`, never the memory body.

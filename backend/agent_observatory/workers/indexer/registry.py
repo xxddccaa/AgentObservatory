@@ -7,20 +7,22 @@ from pathlib import Path
 from agent_observatory.config import Settings
 
 from .adapters import (
+    AgyTranscriptSource,
+    ClaudeJsonlSource,
     CodexJsonlSource,
+    DshJsonlSource,
+    GeminiCliSource,
+    GenericJsonlSource,
+    OpenCodeJsonSource,
+    PiJsonlSource,
     SourceAdapter,
+    StepCliNativeSource,
+    StepCodeImporter,
     StepCodeSqliteSource,
+    StepGoHostSource,
     XDCodeJsonlSource,
 )
-from .claude import ClaudeJsonlSource
-from .dsh import DshJsonlSource
-from .generic import GenericJsonlSource
-from .opencode import OpenCodeJsonSource
-from .pi import PiJsonlSource
 from .scanner import RolloutScanner
-from .stepcli import StepCliNativeSource
-from .stepcode import StepCodeImporter
-from .stepgo_host import StepGoHostSource
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,11 @@ def build_registry(
 
     adapters.append(StepGoHostSource(Path(config.stepgo_host_root).expanduser()))
 
+    # Registered even before agy's first run: discovery probes ``brain`` on
+    # every poll, so conversations appear without restarting the worker.
+    adapters.append(AgyTranscriptSource(Path(config.agy_home).expanduser()))
+    adapters.append(GeminiCliSource(Path(config.gemini_home).expanduser()))
+
     # Keep executable layouts explicit. The broad OpenCode roots support
     # installations that nest ``storage`` one level deeper.
     known: list[tuple[str, str, str]] = [
@@ -95,7 +102,7 @@ def build_registry(
         for raw_root in roots:
             root = (
                 Path(raw_root).expanduser()
-                if agent in {"pi", "xdcode", "stepgo"}
+                if agent in {"pi", "xdcode", "stepgo", "agy", "gemini"}
                 else _existing(raw_root)
             )
             if root is None:
@@ -117,6 +124,11 @@ def build_registry(
                 adapters.append(PiJsonlSource(root))
             elif agent == "stepgo":
                 adapters.append(StepGoHostSource(root))
+            elif agent == "agy":
+                # Extra roots name the agy home (the directory holding ``brain``).
+                adapters.append(AgyTranscriptSource(root))
+            elif agent == "gemini":
+                adapters.append(GeminiCliSource(root))
             elif agent == "claude":
                 adapters.append(ClaudeJsonlSource(root, agent="claude", parser_version="2"))
             elif agent == "stepcode":

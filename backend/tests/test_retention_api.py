@@ -1,4 +1,4 @@
-"""Retention API: RBAC, preview contract and the command-table hand-off."""
+"""Retention API: preview contract and the command-table hand-off."""
 from __future__ import annotations
 
 import pytest
@@ -7,31 +7,9 @@ from sqlalchemy import select
 from agent_observatory.db.models import AuditLog, RetentionRun, SystemCommand
 
 
-async def _login(client, username: str, password: str) -> None:
-    response = await client.post(
-        "/api/auth/login", json={"username": username, "password": password}
-    )
-    assert response.status_code == 200, response.text
-
-
-@pytest.mark.anyio
-async def test_retention_requires_operator_or_admin(
-    client, viewer_user, retention_env
-) -> None:
-    await _login(client, "viewer1", "viewer-password-123")
-    overview = await client.get("/api/retention/overview")
-    assert overview.status_code == 403
-    preview = await client.post(
-        "/api/retention/preview", json={"selection": {"keep_days": 7}}
-    )
-    assert preview.status_code == 403
-    runs = await client.get("/api/retention/runs")
-    assert runs.status_code == 403
-
-
 @pytest.mark.anyio
 async def test_overview_and_catalog_expose_configured_roots(
-    client, as_operator, retention_env
+    client, retention_env
 ) -> None:
     retention_env.make_file(
         "codex/sessions/2026/08/01/rollout-old.jsonl", age_hours=24 * 30
@@ -54,7 +32,7 @@ async def test_overview_and_catalog_expose_configured_roots(
 
 @pytest.mark.anyio
 async def test_api_payloads_are_never_browser_cacheable(
-    client, as_operator, retention_env
+    client, retention_env
 ) -> None:
     response = await client.get("/api/retention/overview")
     assert response.status_code == 200
@@ -63,7 +41,7 @@ async def test_api_payloads_are_never_browser_cacheable(
 
 @pytest.mark.anyio
 async def test_preview_then_run_queues_a_supervisor_command(
-    client, admin_user, db_session, retention_env
+    client, db_session, retention_env
 ) -> None:
     old_file = retention_env.make_file(
         "codex/sessions/2026/08/01/rollout-old.jsonl", age_hours=24 * 30
@@ -71,7 +49,6 @@ async def test_preview_then_run_queues_a_supervisor_command(
     retention_env.make_file(
         "codex/sessions/2026/09/11/rollout-new.jsonl", age_hours=2
     )
-    await _login(client, "admin", "admin-password-123")
 
     preview = await client.post(
         "/api/retention/preview",
@@ -112,7 +89,7 @@ async def test_preview_then_run_queues_a_supervisor_command(
     assert command is not None
     assert command.command_type == "retention.purge"
     assert command.payload == {"run_id": payload["run"]["id"]}
-    assert command.requested_by == admin_user["id"]
+    assert command.requested_by == "local"
 
     run = await db_session.get(RetentionRun, payload["run"]["id"])
     assert run is not None
@@ -136,7 +113,7 @@ async def test_preview_then_run_queues_a_supervisor_command(
 
 @pytest.mark.anyio
 async def test_run_rejects_a_tampered_plan_token(
-    client, as_admin, retention_env
+    client, retention_env
 ) -> None:
     retention_env.make_file(
         "codex/sessions/2026/08/01/rollout-old.jsonl", age_hours=24 * 30
@@ -152,20 +129,3 @@ async def test_run_rejects_a_tampered_plan_token(
     )
     assert response.status_code == 400
     assert "token" in response.json()["error"]["message"]
-
-
-@pytest.mark.anyio
-async def test_run_is_admin_only(client, as_operator, retention_env) -> None:
-    retention_env.make_file(
-        "codex/sessions/2026/08/01/rollout-old.jsonl", age_hours=24 * 30
-    )
-    preview = await client.post(
-        "/api/retention/preview",
-        json={"selection": {"keep_days": 7, "entry_ids": ["codex.sessions"]}},
-    )
-    assert preview.status_code == 200
-    response = await client.post(
-        "/api/retention/runs",
-        json={"plan_token": preview.json()["plan_token"], "confirm": True},
-    )
-    assert response.status_code == 403

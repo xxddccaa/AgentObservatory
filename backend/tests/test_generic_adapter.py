@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from agent_observatory.db.models import AgentEvent
 from agent_observatory.workers.indexer.adapters import PlanAction, SourcePlan
-from agent_observatory.workers.indexer.generic import GenericJsonlSource
+from agent_observatory.workers.indexer.adapters.generic import GenericJsonlSource
 
 
 @pytest.mark.asyncio

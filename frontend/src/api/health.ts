@@ -31,11 +31,11 @@ export interface ReadyHealth {
 export type Health = ReadyHealth;
 
 export function getLiveHealth(): Promise<LiveHealth> {
-  return get<LiveHealth>("/api/health/live", { suppressAuthHandler: true });
+  return get<LiveHealth>("/api/health/live");
 }
 
 export function getReadyHealth(): Promise<ReadyHealth> {
-  return get<ReadyHealth>("/api/health/ready", { suppressAuthHandler: true });
+  return get<ReadyHealth>("/api/health/ready");
 }
 
 export function getHealth(): Promise<ReadyHealth> {

@@ -10,6 +10,8 @@ session degrades to scanning the big child tables once per deleted parent row.
 """
 from __future__ import annotations
 
+import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0012_fk_covering_indexes"
@@ -29,8 +31,11 @@ _INDEXES = (
 
 
 def upgrade() -> None:
+    existing = set(sa.inspect(op.get_bind()).get_table_names())
     for name, table, column in _INDEXES:
-        op.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})")
+        # ``user_roles`` only exists on databases created before 0016.
+        if table in existing:
+            op.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})")
 
 
 def downgrade() -> None:

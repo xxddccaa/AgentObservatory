@@ -1,7 +1,7 @@
 """Audit logging.
 
-Append-only writes to `audit_logs`. Every auth event and every later control
-action flows through `record(...)`. Secrets never land here: callers pass a
+Append-only writes to `audit_logs`. Every user and system control action
+flows through `record(...)`. Secrets never land here: callers pass a
 redacted `detail` dict (see AGENTS.md #19). The raw request id / ip / ua are
 threaded in from the request context so a single call site can emit a fully
 attributed row.
@@ -15,10 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import AuditLog
 
-# actor_type ∈ {user, system, bootstrap}; result ∈ {success, failure, error}
-ACTOR_USER = "user"
+# actor_type ∈ {local, system}; result ∈ {success, failure, error}.
+# ``local`` is whoever uses the (login-free, loopback-bound) web UI or API;
+# rows written before accounts were removed may still say user / bootstrap.
+ACTOR_LOCAL = "local"
 ACTOR_SYSTEM = "system"
-ACTOR_BOOTSTRAP = "bootstrap"
 
 RESULT_SUCCESS = "success"
 RESULT_FAILURE = "failure"
@@ -30,7 +31,7 @@ async def record(
     *,
     action: str,
     actor_id: str | None = None,
-    actor_type: str = ACTOR_USER,
+    actor_type: str = ACTOR_LOCAL,
     resource_type: str | None = None,
     resource_id: str | None = None,
     request_id: str | None = None,
@@ -84,9 +85,8 @@ async def list_audit(
 __all__ = [
     "record",
     "list_audit",
-    "ACTOR_USER",
+    "ACTOR_LOCAL",
     "ACTOR_SYSTEM",
-    "ACTOR_BOOTSTRAP",
     "RESULT_SUCCESS",
     "RESULT_FAILURE",
     "RESULT_ERROR",

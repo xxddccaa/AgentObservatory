@@ -1,5 +1,4 @@
 import { createApp, nextTick } from "vue";
-import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const memoriesApi = vi.hoisted(() => ({
@@ -15,7 +14,6 @@ vi.mock("../api/memories", async (importOriginal) => {
   return { ...actual, ...memoriesApi };
 });
 
-import { useAuthStore } from "../stores/auth";
 import Memories from "../views/Memories.vue";
 
 const entry = {
@@ -47,19 +45,7 @@ async function flush() {
 async function mountView() {
   const root = document.createElement("div");
   document.body.appendChild(root);
-  const pinia = createPinia();
-  setActivePinia(pinia);
-  const auth = useAuthStore();
-  auth.$patch({
-    status: "authed",
-    principal: {
-      id: "admin",
-      username: "admin",
-      roles: ["admin"],
-    },
-  });
   const app = createApp(Memories);
-  app.use(pinia);
   app.mount(root);
   await flush();
   return { app, root };

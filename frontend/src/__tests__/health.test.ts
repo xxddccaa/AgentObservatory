@@ -30,7 +30,7 @@ describe("getHealth", () => {
     expect(h.version).toBe("0.1.0");
     expect(fetch).toHaveBeenCalledWith(
       "/api/health/ready",
-      expect.objectContaining({ credentials: "include" })
+      expect.objectContaining({ credentials: "same-origin" })
     );
   });
   it("throws on non-2xx", async () => {
@@ -49,7 +49,7 @@ describe("getHealth", () => {
     await expect(getLiveHealth()).resolves.toEqual({ status: "ok", version: "0.1.0" });
     expect(fetch).toHaveBeenCalledWith(
       "/api/health/live",
-      expect.objectContaining({ credentials: "include" })
+      expect.objectContaining({ credentials: "same-origin" })
     );
   });
 });

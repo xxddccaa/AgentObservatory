@@ -75,7 +75,7 @@
       </label>
       <button
         type="button"
-        :disabled="!auth.canOperate || exporting"
+        :disabled="exporting"
         title="Download selected memories as Markdown"
         @click="downloadSelected('markdown')"
       >
@@ -84,7 +84,7 @@
       </button>
       <button
         type="button"
-        :disabled="!auth.canOperate || exporting"
+        :disabled="exporting"
         title="Download selected memories with manifest"
         @click="downloadSelected('zip')"
       >
@@ -92,7 +92,6 @@
         ZIP
       </button>
       <button type="button" class="clear-selection" @click="clearSelection">Clear</button>
-      <span v-if="!auth.canOperate" class="permission-note">Operator access required to export.</span>
     </section>
 
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
@@ -171,7 +170,7 @@
               <button
                 v-if="detail.content_redacted"
                 type="button"
-                :disabled="!auth.canOperate || actionBusy"
+                :disabled="actionBusy"
                 title="Reveal complete sensitive memory"
                 @click="revealContent"
               >
@@ -180,7 +179,7 @@
               </button>
               <button
                 type="button"
-                :disabled="!auth.canOperate || actionBusy"
+                :disabled="actionBusy"
                 title="Copy exact memory content"
                 @click="copyContent('raw')"
               >
@@ -190,7 +189,7 @@
               </button>
               <button
                 type="button"
-                :disabled="!auth.canOperate || actionBusy"
+                :disabled="actionBusy"
                 title="Copy memory with portable Markdown metadata"
                 @click="copyContent('markdown')"
               >
@@ -285,9 +284,7 @@ import {
 } from "../api/memories";
 import { agentLabel } from "../constants/agents";
 import { renderMarkdown } from "../markdown/render";
-import { useAuthStore } from "../stores/auth";
 
-const auth = useAuthStore();
 const entries = ref<MemoryEntry[]>([]);
 const sources = ref<MemorySource[]>([]);
 const detail = ref<MemoryDetail | null>(null);
@@ -512,7 +509,6 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .bulk-bar { display: flex; align-items: center; gap: 8px; min-height: 42px; margin-bottom: 12px; padding: 4px 8px 4px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-weak); }
 .bulk-bar label { display: flex; align-items: center; gap: 6px; margin-left: auto; color: var(--fg-muted); font-size: 11px; }
 .bulk-bar .clear-selection { border-color: transparent; background: transparent; color: var(--fg-muted); }
-.permission-note { color: var(--warn); font-size: 11px; }
 .notice { min-height: 24px; margin: 0; color: var(--ok); font-size: 12px; }
 .memory-shell { display: grid; grid-template-columns: minmax(300px, 390px) minmax(0, 1fr); min-height: 640px; max-height: calc(100dvh - 230px); border: 1px solid var(--border); border-radius: 7px; background: var(--panel); overflow: hidden; }
 .memory-list { min-width: 0; overflow-y: auto; border-right: 1px solid var(--border); background: var(--panel); }

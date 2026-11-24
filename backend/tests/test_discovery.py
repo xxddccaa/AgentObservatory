@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from agent_observatory.workers.indexer import discovery
-from agent_observatory.workers.indexer.claude import ClaudeJsonlSource
-from agent_observatory.workers.indexer.generic import GenericJsonlSource
+from agent_observatory.workers.indexer.adapters.claude import ClaudeJsonlSource
+from agent_observatory.workers.indexer.adapters.generic import GenericJsonlSource
 from agent_observatory.workers.indexer.registry import build_registry
 
 
@@ -77,7 +77,7 @@ def test_registry_dedupes_adapters_reading_the_same_real_directory(tmp_path) -> 
     ``~/.claude/projects``; both adapters used to enumerate every Claude
     session, doubling that part of each polling cycle.
     """
-    from agent_observatory.workers.indexer.claude import ClaudeJsonlSource
+    from agent_observatory.workers.indexer.adapters.claude import ClaudeJsonlSource
     from agent_observatory.workers.indexer.registry import _deduplicate_adapters
 
     real = tmp_path / "claude-projects"

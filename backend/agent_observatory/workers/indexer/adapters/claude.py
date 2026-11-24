@@ -6,7 +6,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import (
@@ -18,13 +18,10 @@ from agent_observatory.db.models import (
     ToolCall,
 )
 
-from .adapters import PlanAction, SourceDescriptor, SourcePlan
+from ..tree_cache import cached_resolve, rglob_cached
+from .base import PlanAction, SourceDescriptor, SourcePlan
 from .claude_parser import ClaudeRecord, content_blocks, iter_records
-from .tree_cache import cached_resolve, rglob_cached
-
-
-def _id(prefix: str, value: str) -> str:
-    return hashlib.sha256(f"{prefix}:{value}".encode()).hexdigest()[:48]
+from .common import clear_session_rows, plan_append_jsonl, stable_id
 
 
 def _text(value: Any) -> str:
@@ -123,31 +120,15 @@ class ClaudeJsonlSource:
         ]
 
     def plan(self, source: SourceDescriptor, checkpoint: Any | None) -> SourcePlan:
-        stat = source.path.stat()
-        fingerprint = {
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "path": str(source.path.resolve()),
-            "agent": self.agent,
-        }
-        if checkpoint is None or checkpoint.parser_version != self.parser_version:
-            return SourcePlan(source, PlanAction.REBUILD, fingerprint)
-        previous = checkpoint.fingerprint_json or {}
-        cursor = checkpoint.cursor_json or {}
-        if previous.get("agent") != self.agent or previous.get("path") != fingerprint["path"]:
-            return SourcePlan(source, PlanAction.REBUILD, fingerprint)
-        if stat.st_size < int(cursor.get("byte_offset", 0)):
-            return SourcePlan(source, PlanAction.REBUILD, fingerprint)
-        if (
-            stat.st_size == previous.get("size")
-            and stat.st_mtime_ns == previous.get("mtime_ns")
-            and checkpoint.status == "indexed"
-        ):
-            return SourcePlan(source, PlanAction.UNCHANGED, fingerprint)
-        # Same-size edits are conservatively rebuilt; append is only selected
-        # when the file grew beyond the last indexed byte.
-        action = PlanAction.APPEND if stat.st_size > int(previous.get("size", 0)) else PlanAction.REBUILD
-        return SourcePlan(source, action, fingerprint)
+        return plan_append_jsonl(
+            source,
+            checkpoint,
+            self.parser_version,
+            extra_fp={"agent": self.agent},
+            check_prefix=False,
+            rebuild_on_same_size=True,
+            cached_path=False,
+        )
 
     async def ingest(self, db: AsyncSession, plan: SourcePlan) -> AgentSession:
         source = plan.source
@@ -155,7 +136,7 @@ class ClaudeJsonlSource:
         session = await db.scalar(select(AgentSession).where(AgentSession.source_identity == source.identity))
         if session is None:
             session = AgentSession(
-                id=_id("session", source.identity),
+                id=stable_id("session", source.identity),
                 thread_id=source.path.stem,
                 rollout_path=str(source.path),
                 rollout_real_path=f"{self.agent}:{real_path}",
@@ -258,14 +239,10 @@ class ClaudeJsonlSource:
         return session
 
     async def _clear(self, db: AsyncSession, session_id: str) -> None:
-        for model in (ActivitySpan, CodexMessage, ToolCall, AgentTurn, AgentEvent):
-            await db.execute(delete(model).where(model.agent_session_id == session_id))
+        await clear_session_rows(db, session_id)
 
     async def _project(self, db: AsyncSession, session: AgentSession) -> None:
-        await db.execute(delete(ActivitySpan).where(ActivitySpan.agent_session_id == session.id))
-        await db.execute(delete(CodexMessage).where(CodexMessage.agent_session_id == session.id))
-        await db.execute(delete(ToolCall).where(ToolCall.agent_session_id == session.id))
-        await db.execute(delete(AgentTurn).where(AgentTurn.agent_session_id == session.id))
+        await clear_session_rows(db, session.id, include_events=False)
         events = (
             await db.scalars(
                 select(AgentEvent)
@@ -283,7 +260,7 @@ class ClaudeJsonlSource:
             blocks = content_blocks(ClaudeRecord(event.line_number, event.byte_offset, raw, event.raw_hash, event.event_timestamp))
             if typ == "user" and not any(block.get("type") == "tool_result" for block in blocks):
                 current = AgentTurn(
-                    id=_id("turn", f"{session.id}:{len(turns)}"),
+                    id=stable_id("turn", f"{session.id}:{len(turns)}"),
                     agent=self.agent,
                     agent_session_id=session.id,
                     turn_index=len(turns),
@@ -303,7 +280,7 @@ class ClaudeJsonlSource:
             if typ == "summary":
                 text = _text(raw.get("summary") or raw.get("content"))
                 if text:
-                    db.add(CodexMessage(id=_id("msg", str(event.id)), agent_session_id=session.id, event_id=event.id, turn_id=current.id if current else None, role="system", channel="commentary", text=text, markdown_text=text, copy_text=text, sequence=sequence, timestamp=event.event_timestamp))
+                    db.add(CodexMessage(id=stable_id("msg", str(event.id)), agent_session_id=session.id, event_id=event.id, turn_id=current.id if current else None, role="system", channel="commentary", text=text, markdown_text=text, copy_text=text, sequence=sequence, timestamp=event.event_timestamp))
                     sequence += 1
             for block in blocks:
                 kind = block.get("type")
@@ -311,18 +288,18 @@ class ClaudeJsonlSource:
                     text = _text(block.get("text"))
                     if text and current:
                         role = "user" if typ == "user" else "assistant"
-                        db.add(CodexMessage(id=_id("msg", f"{event.id}:{sequence}"), agent_session_id=session.id, event_id=event.id, turn_id=current.id, role=role, channel="final", text=text, markdown_text=text, copy_text=text, sequence=sequence, timestamp=event.event_timestamp))
+                        db.add(CodexMessage(id=stable_id("msg", f"{event.id}:{sequence}"), agent_session_id=session.id, event_id=event.id, turn_id=current.id, role=role, channel="final", text=text, markdown_text=text, copy_text=text, sequence=sequence, timestamp=event.event_timestamp))
                         sequence += 1
                 elif kind == "thinking" and current:
                     text = _text(block.get("thinking") or block.get("text"))
                     if text:
-                        db.add(CodexMessage(id=_id("msg", f"{event.id}:{sequence}"), agent_session_id=session.id, event_id=event.id, turn_id=current.id, role="assistant", channel="reasoning", text=text, markdown_text=text, copy_text=text, sequence=sequence, timestamp=event.event_timestamp, is_visible=False))
+                        db.add(CodexMessage(id=stable_id("msg", f"{event.id}:{sequence}"), agent_session_id=session.id, event_id=event.id, turn_id=current.id, role="assistant", channel="reasoning", text=text, markdown_text=text, copy_text=text, sequence=sequence, timestamp=event.event_timestamp, is_visible=False))
                         sequence += 1
                 elif kind == "tool_use":
                     call_id = str(block.get("id") or f"{event.id}:{sequence}")
                     if call_id in tools:
                         continue
-                    tool = ToolCall(id=_id("tool", f"{session.id}:{call_id}"), agent=self.agent, agent_session_id=session.id, turn_id=current.id if current else None, event_id=event.id, call_id=call_id, tool_name=str(block.get("name") or "unknown")[:255], tool_kind="tool", arguments_json=block.get("input") if isinstance(block.get("input"), dict) else None, command_text=_text(block.get("input")), started_at=event.event_timestamp, status="pending")
+                    tool = ToolCall(id=stable_id("tool", f"{session.id}:{call_id}"), agent=self.agent, agent_session_id=session.id, turn_id=current.id if current else None, event_id=event.id, call_id=call_id, tool_name=str(block.get("name") or "unknown")[:255], tool_kind="tool", arguments_json=block.get("input") if isinstance(block.get("input"), dict) else None, command_text=_text(block.get("input")), started_at=event.event_timestamp, status="pending")
                     db.add(tool)
                     tools[call_id] = tool
                 elif kind == "tool_result":
@@ -353,7 +330,7 @@ class ClaudeJsonlSource:
             if turn.started_at is not None:
                 db.add(
                     ActivitySpan(
-                        id=_id("span", f"turn:{turn.id}"),
+                        id=stable_id("span", f"turn:{turn.id}"),
                         agent=self.agent,
                         source_kind=self.kind,
                         source_record_id=f"turn:{turn.turn_index}",
@@ -378,7 +355,7 @@ class ClaudeJsonlSource:
             if tool.started_at is not None:
                 db.add(
                     ActivitySpan(
-                        id=_id("span", f"tool:{tool.id}"),
+                        id=stable_id("span", f"tool:{tool.id}"),
                         agent=self.agent,
                         source_kind=self.kind,
                         source_record_id=f"tool:{tool.call_id}",

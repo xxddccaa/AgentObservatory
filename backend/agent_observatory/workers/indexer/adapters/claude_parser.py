@@ -5,9 +5,11 @@ import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from .common import MAX_LINE_BYTES, parse_ts, pg_safe
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,26 +26,6 @@ class ClaudeRecord:
         return str(self.raw_json.get("type") or "unknown")
 
 
-def _timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-    except ValueError:
-        return None
-
-
-def _sanitize(value: Any) -> Any:
-    # PostgreSQL rejects literal NULs in JSON/text values.
-    if isinstance(value, str):
-        return value.replace("\x00", "\\u0000")
-    if isinstance(value, dict):
-        return {_sanitize(k): _sanitize(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_sanitize(v) for v in value]
-    return value
-
-
 def parse_line(line: str, *, line_number: int = 0, byte_offset: int = 0) -> ClaudeRecord:
     raw = json.loads(line)
     if not isinstance(raw, dict):
@@ -51,9 +33,9 @@ def parse_line(line: str, *, line_number: int = 0, byte_offset: int = 0) -> Clau
     return ClaudeRecord(
         line_number=line_number,
         byte_offset=byte_offset,
-        raw_json=_sanitize(raw),
+        raw_json=pg_safe(raw),
         raw_hash=hashlib.sha256(line.encode("utf-8")).hexdigest(),
-        timestamp=_timestamp(raw.get("timestamp")),
+        timestamp=parse_ts(raw.get("timestamp")),
         byte_length=len(line.encode("utf-8")),
     )
 
@@ -71,7 +53,7 @@ def iter_records(
     line is ignored so the next poll can retry it after the writer completes.
     """
     consumed = 0
-    max_line_bytes = 8 * 1024 * 1024
+    max_line_bytes = MAX_LINE_BYTES
     with Path(path).open("rb") as handle:
         handle.seek(offset)
         line_number = line_offset

@@ -30,7 +30,7 @@ describe("memories API", () => {
     });
     expect(fetch).toHaveBeenCalledWith(
       "/api/memories?limit=50&cursor=next%2Fpage&q=deploy+notes&agent=claude&scope=project&include_missing=true",
-      expect.objectContaining({ credentials: "include" }),
+      expect.objectContaining({ credentials: "same-origin" }),
     );
   });
 

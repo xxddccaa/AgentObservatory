@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_observatory.workers.indexer.stepcode import StepCodeImporter
+from agent_observatory.workers.indexer.adapters.stepcode import StepCodeImporter
 
 
 def _create_history(path: Path) -> None:

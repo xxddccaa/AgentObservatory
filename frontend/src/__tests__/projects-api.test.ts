@@ -35,7 +35,7 @@ describe("projects API", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects?limit=50&offset=10&q=%2Ftmp%2Fdemo+project&range=week&agent=step+code&model=gpt%2Ftest",
-      expect.objectContaining({ credentials: "include" })
+      expect.objectContaining({ credentials: "same-origin" })
     );
   });
 

@@ -24,10 +24,10 @@ from agent_observatory.workers.indexer.adapters import (
     PlanAction,
     StepCodeSqliteSource,
 )
-from agent_observatory.workers.indexer.generic import GenericJsonlSource
+from agent_observatory.workers.indexer.adapters.generic import GenericJsonlSource
+from agent_observatory.workers.indexer.adapters.stepcode import StepCodeImporter
 from agent_observatory.workers.indexer.orchestrator import IndexerOrchestrator
 from agent_observatory.workers.indexer.scanner import RolloutScanner
-from agent_observatory.workers.indexer.stepcode import StepCodeImporter
 
 
 class _Checkpoint:

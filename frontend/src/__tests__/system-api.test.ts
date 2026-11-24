@@ -31,7 +31,7 @@ describe("system API", () => {
     await getSystemLogs({ component: "indexer worker", cursor: "next/item", limit: 900 });
     expect(fetch).toHaveBeenCalledWith(
       "/api/system/logs?component=indexer+worker&cursor=next%2Fitem&limit=500",
-      expect.objectContaining({ credentials: "include" })
+      expect.objectContaining({ credentials: "same-origin" })
     );
   });
 });

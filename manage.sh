@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# AgentObservatory 交互式管理菜单：状态 / 启停 / 日志 / 重置密码 / 健康检查
+# AgentObservatory 交互式管理菜单：状态 / 启停 / 日志 / 健康检查（单人本机使用，无登录）
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOME_DIR="${AGENT_OBS_HOME:-/root/.agent-observatory}"
+# Linux 服务器用 root 部署（/root）；macOS 无 root 时部署到当前用户 home。
+DEFAULT_HOME=/root/.agent-observatory
+if [ "$(uname -s)" = Darwin ] && [ "$(id -u)" != 0 ]; then
+  DEFAULT_HOME="$HOME/.agent-observatory"
+fi
+HOME_DIR="${AGENT_OBS_HOME:-$DEFAULT_HOME}"
 export AGENT_OBS_HOME="$HOME_DIR"
 export AGENT_OBS_ENV_FILE="${AGENT_OBS_ENV_FILE:-$HOME_DIR/config.env}"
 CLI="$HOME_DIR/current/backend/.venv/bin/agent-observatory"
@@ -15,12 +20,12 @@ usage() {
   ./manage.sh <命令>       直通执行
 
 命令:
-  deploy | status | up | down | restart | logs | passwd | doctor
+  deploy | status | up | down | restart | logs | doctor
 
 示例:
   ./manage.sh status
   ./manage.sh logs api --lines 200 --follow
-  ./manage.sh passwd admin
+  AGENT_OBS_HOST=0.0.0.0 ./manage.sh deploy   # 首次部署时改为监听所有网卡（无登录，慎用）
 EOF
 }
 
@@ -90,15 +95,6 @@ view_logs() {
   fi
 }
 
-reset_password() {
-  local username
-  read -rp "要重置的用户名 (默认 admin): " username
-  username="${username:-admin}"
-  echo "即将重置 '$username' 的密码：输入不回显、需输入两次，"
-  echo "重置成功后会吊销该用户全部已登录会话与 API 令牌。"
-  run_cli user-passwd "$username"
-}
-
 menu() {
   if [ ! -t 0 ]; then
     echo "交互菜单需要终端（TTY）；可用 ./manage.sh <命令> 直通执行。" >&2
@@ -119,19 +115,17 @@ menu() {
     echo " 3) 停止服务 (down)"
     echo " 4) 重启服务 (restart)"
     echo " 5) 查看日志"
-    echo " 6) 重置密码"
-    echo " 7) 健康检查 (doctor)"
+    echo " 6) 健康检查 (doctor)"
     echo " 0) 退出"
     echo "--------------------------------------------------"
-    read -rp "请选择 [0-7]: " choice || choice="0"
+    read -rp "请选择 [0-6]: " choice || choice="0"
     case "$choice" in
       1) run_cli status ;;
       2) deploy ;;
       3) run_cli down ;;
       4) run_cli restart ;;
       5) view_logs ;;
-      6) reset_password ;;
-      7) run_cli doctor ;;
+      6) run_cli doctor ;;
       0) echo "已退出"; return 0 ;;
       *) echo "无效选项: $choice" ;;
     esac
@@ -148,11 +142,6 @@ case "${1:-}" in
   logs)
     shift
     run_cli logs "$@"
-    ;;
-  passwd|password|user-passwd)
-    shift
-    if [ "$#" -eq 0 ]; then set -- admin; fi
-    run_cli user-passwd "$@"
     ;;
   -h|--help|help) usage ;;
   *)

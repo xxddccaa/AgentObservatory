@@ -4,21 +4,19 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import AgentSession, IndexCheckpoint
 
-
 _LOOKUP_CHUNK = 400
-_T = TypeVar("_T")
 
 
-def _chunked(values: Iterable[_T], size: int) -> Iterator[list[_T]]:
+def _chunked[T](values: Iterable[T], size: int) -> Iterator[list[T]]:
     """Yield ``size``-bounded batches so ``IN`` clauses stay well-formed."""
-    batch: list[_T] = []
+    batch: list[T] = []
     for value in values:
         batch.append(value)
         if len(batch) >= size:

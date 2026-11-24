@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import zstandard as zstd
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import (
@@ -19,23 +18,15 @@ from agent_observatory.db.models import (
     ToolCall,
 )
 
-from .adapters import PlanAction, SourceDescriptor, SourcePlan
-from .tree_cache import cached_resolve, rglob_cached
-
-
-def _ts(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    try:
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value / 1000 if value > 1e11 else value, tz=UTC)
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def _id(prefix: str, value: str) -> str:
-    return hashlib.sha256(f"{prefix}:{value}".encode()).hexdigest()[:48]
+from ..tree_cache import cached_resolve, rglob_cached
+from .base import SourceDescriptor, SourcePlan
+from .common import (
+    clear_session_rows,
+    parse_ts,
+    pg_safe,
+    plan_stat_rebuild,
+    stable_id,
+)
 
 
 def _text(value: Any) -> str:
@@ -51,16 +42,6 @@ def _text(value: Any) -> str:
                 return _text(value[key])
         return json.dumps(value, ensure_ascii=False)
     return str(value)
-
-
-def _pg_safe(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.replace("\x00", "\\u0000")
-    if isinstance(value, dict):
-        return {str(_pg_safe(key)): _pg_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_pg_safe(item) for item in value]
-    return value
 
 
 def _turn_key(data: dict[str, Any], fallback: str) -> str:
@@ -111,25 +92,11 @@ class DshJsonlSource:
         ]
 
     def plan(self, source: SourceDescriptor, checkpoint: Any | None = None) -> SourcePlan:
-        st = source.path.stat()
-        fp = {
-            "size": st.st_size,
-            "mtime_ns": st.st_mtime_ns,
-            "path": str(source.path.resolve()),
-            "compression": "zstd",
-        }
-        if checkpoint is None or getattr(checkpoint, "parser_version", None) != self.parser_version:
-            return SourcePlan(source, PlanAction.REBUILD, fp)
-        prev = getattr(checkpoint, "fingerprint_json", {}) or {}
-        if (
-            getattr(checkpoint, "status", None) == "indexed"
-            and prev.get("size") == st.st_size
-            and prev.get("mtime_ns") == st.st_mtime_ns
-        ):
-            return SourcePlan(source, PlanAction.UNCHANGED, fp)
         # Zstandard frames are streamed from the beginning; changed files are
         # rebuilt rather than pretending byte offsets are seekable.
-        return SourcePlan(source, PlanAction.REBUILD, fp)
+        return plan_stat_rebuild(
+            source, checkpoint, self.parser_version, extra_fp={"compression": "zstd"}
+        )
 
     def _iter_lines(self, path):
         with path.open("rb") as fh, zstd.ZstdDecompressor().stream_reader(fh) as rd:
@@ -152,7 +119,7 @@ class DshJsonlSource:
         session = await db.scalar(
             select(AgentSession).where(AgentSession.source_identity == src.identity)
         )
-        sid = _id("session", src.identity)
+        sid = stable_id("session", src.identity)
         if session is None:
             session = AgentSession(
                 id=sid,
@@ -172,14 +139,7 @@ class DshJsonlSource:
             db.add(session)
             await db.flush()
         else:
-            for model in (
-                ActivitySpan,
-                CodexMessage,
-                ToolCall,
-                AgentTurn,
-                AgentEvent,
-            ):
-                await db.execute(delete(model).where(model.agent_session_id == session.id))
+            await clear_session_rows(db, session.id)
         session.agent = self.agent
         session.source_kind = self.kind
         session.source_compression = "zstd"
@@ -202,7 +162,7 @@ class DshJsonlSource:
                 obj = {"type": "parse_error", "raw": line.decode("utf-8", "replace")}
             if not isinstance(obj, dict):
                 obj = {"type": "raw", "value": obj}
-            obj = _pg_safe(obj)
+            obj = pg_safe(obj)
             typ = str(obj.get("type", "unknown"))
             data = obj.get("data") if isinstance(obj.get("data"), dict) else obj
             # DSH records often use generic ``data.turn``/``data.step`` envelopes.
@@ -220,10 +180,10 @@ class DshJsonlSource:
                 session.thread_id = str(obj.get("id") or src.identity)
                 session.cwd = obj.get("cwd")
                 session.parent_session_id = obj.get("parentSession")
-                session.start_time = _ts(obj.get("createdAt"))
+                session.start_time = parse_ts(obj.get("createdAt"))
                 session.is_subagent = bool(obj.get("parentSession"))
                 start = session.start_time
-            ts = _ts(obj.get("time") or obj.get("timestamp"))
+            ts = parse_ts(obj.get("time") or obj.get("timestamp"))
             ev = AgentEvent(
                 agent_session_id=session.id,
                 event_index=idx,
@@ -275,7 +235,7 @@ class DshJsonlSource:
                     first_user = first_user or text
                 messages.append(
                     CodexMessage(
-                        id=_id("msg", f"{session.id}:{idx}"),
+                        id=stable_id("msg", f"{session.id}:{idx}"),
                         agent_session_id=session.id,
                         event_id=ev.id,
                         role="user",
@@ -318,7 +278,7 @@ class DshJsonlSource:
                     )
                     messages.append(
                         CodexMessage(
-                            id=_id(
+                            id=stable_id(
                                 "msg",
                                 f"{session.id}:{idx}:{len(messages)}",
                             ),
@@ -390,7 +350,7 @@ class DshJsonlSource:
             elif typ == "turn/start":
                 tid = _turn_key(data, str(idx))
                 turns[tid] = AgentTurn(
-                    id=_id("turn", f"{session.id}:{tid}"),
+                    id=stable_id("turn", f"{session.id}:{tid}"),
                     agent=self.agent,
                     agent_session_id=session.id,
                     turn_index=len(turns),
@@ -447,7 +407,7 @@ class DshJsonlSource:
                     except json.JSONDecodeError:
                         arguments = {"raw": arguments}
                 tc = ToolCall(
-                    id=_id("tool", f"{session.id}:{cid}"),
+                    id=stable_id("tool", f"{session.id}:{cid}"),
                     agent=self.agent,
                     agent_session_id=session.id,
                     turn_id=turns.get(tid).id if tid in turns else None,
@@ -533,7 +493,7 @@ class DshJsonlSource:
             turn.duration_ms = duration_ms
             db.add(
                 ActivitySpan(
-                    id=_id("span", f"turn:{turn.id}"),
+                    id=stable_id("span", f"turn:{turn.id}"),
                     agent=self.agent,
                     source_kind=self.kind,
                     source_record_id=f"turn:{turn.turn_id}",
@@ -555,7 +515,7 @@ class DshJsonlSource:
                 continue
             db.add(
                 ActivitySpan(
-                    id=_id("span", f"tool:{tool.id}"),
+                    id=stable_id("span", f"tool:{tool.id}"),
                     agent=self.agent,
                     source_kind=self.kind,
                     source_record_id=f"tool:{tool.call_id}",

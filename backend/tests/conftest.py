@@ -72,7 +72,7 @@ async def _test_engine() -> async_sessionmaker[AsyncSession]:
                 "tool_calls, messages, agent_turns, agent_events, "
                 "stepgo_run_events, stepgo_runs, index_checkpoints, agent_sessions, "
                 "system_commands, worker_heartbeats, workspaces, "
-                "audit_logs, api_tokens, sessions, user_roles, users "
+                "audit_logs "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -101,16 +101,10 @@ async def db_session(_test_engine: async_sessionmaker[AsyncSession]) -> AsyncSes
 
 
 @pytest.fixture
-def app(monkeypatch, db_session):
-    import contextlib
-
+def app(db_session):
     from agent_observatory.api.deps import get_db
     from agent_observatory.main import create_app
 
-    monkeypatch.setattr(
-        "agent_observatory.main.lifespan",
-        contextlib.asynccontextmanager(lambda _: (yield)),
-    )
     application = create_app()
 
     async def _test_db():
@@ -149,7 +143,7 @@ def retention_env(tmp_path, monkeypatch):
         retention_overview_ttl=60.0,
         retention_plan_ttl=1800,
         retention_plan_drift_bytes=64 * 1024**2,
-        api_token_secret="retention-test-secret",
+        signing_secret="retention-test-secret",
     )
     monkeypatch.setattr(retention, "settings", lambda: config)
     monkeypatch.setattr("agent_observatory.api.retention.settings", lambda: config)
@@ -178,59 +172,6 @@ def retention_env(tmp_path, monkeypatch):
 async def client(app):
     from httpx import ASGITransport, AsyncClient
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    # Loopback host: the access guard only answers loopback names by default.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as c:
         yield c
-
-
-@pytest.fixture
-async def admin_user(db_session: AsyncSession) -> dict:
-    from agent_observatory.services import users
-
-    u = await users.create_user(
-        db_session, username="admin", password="admin-password-123", roles=["admin"]
-    )
-    await db_session.flush()
-    return users.to_public_dict(u)
-
-
-@pytest.fixture
-async def operator_user(db_session: AsyncSession) -> dict:
-    from agent_observatory.services import users as users_svc
-
-    u = await users_svc.create_user(
-        db_session, username="operator1", password="operator-password-123", roles=["operator"]
-    )
-    await db_session.flush()
-    return users_svc.to_public_dict(u)
-
-
-@pytest.fixture
-async def viewer_user(db_session: AsyncSession) -> dict:
-    from agent_observatory.services import users as users_svc
-
-    u = await users_svc.create_user(
-        db_session, username="viewer1", password="viewer-password-123", roles=["viewer"]
-    )
-    await db_session.flush()
-    return users_svc.to_public_dict(u)
-
-
-@pytest.fixture
-async def as_admin(client, admin_user):
-    return await _login(client, admin_user["username"], "admin-password-123")
-
-
-@pytest.fixture
-async def as_operator(client, operator_user):
-    return await _login(client, operator_user["username"], "operator-password-123")
-
-
-@pytest.fixture
-async def as_viewer(client, viewer_user):
-    return await _login(client, viewer_user["username"], "viewer-password-123")
-
-
-async def _login(client, username, password):
-    r = await client.post("/api/auth/login", json={"username": username, "password": password})
-    assert r.status_code == 200, r.text
-    return client

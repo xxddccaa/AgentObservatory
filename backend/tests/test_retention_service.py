@@ -200,17 +200,17 @@ def test_selection_rejects_unknown_agents_and_bad_windows(retention_env) -> None
 def test_plan_token_round_trip_and_tamper_detection(retention_env) -> None:
     selection = retention.Selection(keep_days=7, entry_ids=("codex.sessions",))
     planned = retention.plan(selection, now=NOW)
-    token = retention.sign_plan(selection, planned.summary(), actor_id="user-1")
+    token = retention.sign_plan(selection, planned.summary())
 
     sealed = retention.verify_plan(token)
-    assert sealed["actor"] == "user-1"
+    assert "actor" not in sealed
     assert sealed["selection"]["entry_ids"] == ["codex.sessions"]
 
     with pytest.raises(retention.RetentionError):
         retention.verify_plan(token[:-2] + "aa")
 
     retention_env.config.retention_plan_ttl = 60
-    stale = retention.sign_plan(selection, planned.summary(), actor_id="user-1")
+    stale = retention.sign_plan(selection, planned.summary())
     retention_env.retention._overview_cache = None  # noqa: SLF001 - cache reset
     import json
 
@@ -310,7 +310,6 @@ async def test_execute_run_deletes_files_and_purges_the_index(
         db_session,
         selection=selection,
         plan_obj=planned,
-        principal_id="admin-1",
         scope="raw+index",
     )
     await db_session.flush()
@@ -342,7 +341,6 @@ async def test_execute_refuses_when_the_plan_grew(retention_env, db_session) -> 
         db_session,
         selection=selection,
         plan_obj=retention.plan(selection, now=NOW),
-        principal_id="admin-1",
         scope="raw+index",
     )
     run.plan = {"totals": {"bytes": 0, "files": 0}}
@@ -363,7 +361,6 @@ async def test_execute_refuses_when_retention_is_disabled(retention_env, db_sess
         db_session,
         selection=selection,
         plan_obj=retention.plan(selection, now=NOW),
-        principal_id="admin-1",
         scope="raw+index",
     )
     await db_session.flush()

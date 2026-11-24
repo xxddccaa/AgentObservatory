@@ -9,8 +9,8 @@ from sqlalchemy import select
 
 from agent_observatory.db.models import StepGoRun, StepGoRunEvent
 from agent_observatory.workers.indexer.adapters import PlanAction
-from agent_observatory.workers.indexer.pi import PiJsonlSource
-from agent_observatory.workers.indexer.stepgo_host import (
+from agent_observatory.workers.indexer.adapters.pi import PiJsonlSource
+from agent_observatory.workers.indexer.adapters.stepgo_host import (
     StepGoHostSource,
     extract_link_facts,
 )
@@ -368,7 +368,6 @@ async def test_stepgo_api_returns_linked_and_unlinked_runs_without_duplicate_ses
     tmp_path: Path,
     db_session,
     client: AsyncClient,
-    as_operator,
 ) -> None:
     pi_root = tmp_path / "pi"
     pi_path = pi_root / "session.jsonl"

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import json
 import os
 import secrets
@@ -41,8 +40,6 @@ def main(argv: list[str] | None = None) -> int:
             "  status       Show component status (--json supported)\n"
             "  logs         Show component logs (--follow supported)\n"
             "  doctor       Check dependencies and configuration\n"
-            "  user-add     Provision a user (username --role ... --password ...)\n"
-            "  user-passwd  Reset a user's password without the current one\n"
             "  indexer      Discover and index local agent sessions\n"
             "  worker       Run the background indexing worker\n"
         )
@@ -51,10 +48,6 @@ def main(argv: list[str] | None = None) -> int:
         return _run_lifecycle("init", argv[1:])
     if argv[0] in {"up", "down", "restart", "status", "logs", "doctor", "dev"}:
         return _run_lifecycle(argv[0], argv[1:])
-    if argv[0] in ("user-add", "useradd"):
-        return _run_async(_run_user_add(argv[1:]))
-    if argv[0] in ("user-passwd", "userpasswd"):
-        return _run_async(_run_user_passwd(argv[1:]))
     if argv[0] == "indexer":
         return _run_async(_run_indexer(once="--once" in argv[1:]))
     if argv[0] == "worker":
@@ -194,7 +187,7 @@ def _start_daemon(home: str, command_id: int) -> int:
             config = settings()
             print(
                 f"supervisor started "
-                f"(pid={process.pid}, api=http://{config.host}:{config.port})"
+                f"(pid={process.pid}, api=http://{config.probe_host}:{config.port})"
             )
             return 0
         if process.poll() is not None:
@@ -253,7 +246,7 @@ def _readiness() -> dict[str, Any] | None:
     config = settings()
     try:
         with urllib.request.urlopen(
-            f"http://{config.host}:{config.port}/api/health/ready", timeout=0.75
+            f"http://{config.probe_host}:{config.port}/api/health/ready", timeout=0.75
         ) as response:
             payload = json.load(response)
             return payload if isinstance(payload, dict) else None
@@ -365,10 +358,8 @@ def _initialize_project() -> int:
             print(".env.example is missing", file=sys.stderr)
             return 1
         content = example.read_text()
-        generated = iter((secrets.token_urlsafe(48), secrets.token_urlsafe(48)))
         marker = "dev-only-change-me-use-random-64-chars"
-        content = content.replace(marker, next(generated), 1)
-        content = content.replace(marker, next(generated), 1)
+        content = content.replace(marker, secrets.token_urlsafe(48), 1)
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(content)
         os.chmod(env_path, 0o600)
@@ -379,53 +370,12 @@ def _initialize_project() -> int:
     settings.cache_clear()
     if _prepare_runtime() != 0:
         return 1
-    result = _run_async(_ensure_initial_admin())
-    if result != 0:
-        return result
     from agent_observatory.config import settings
     from agent_observatory.supervisor import Supervisor
 
     doctor = Supervisor(settings().home).doctor()
     print(json.dumps(doctor, indent=2))
     return 0 if doctor["ok"] else 1
-
-
-async def _ensure_initial_admin() -> int:
-    from sqlalchemy import func, select
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from agent_observatory.db.models import User
-    from agent_observatory.db.session import get_engine
-    from agent_observatory.services import audit, users
-
-    factory = async_sessionmaker(get_engine(), expire_on_commit=False)
-    async with factory() as db:
-        if int(await db.scalar(select(func.count()).select_from(User)) or 0) > 0:
-            return 0
-        username = os.environ.get("AGENT_OBS_ADMIN_USERNAME", "admin").strip() or "admin"
-        password = os.environ.get("AGENT_OBS_ADMIN_PASSWORD")
-        if not password:
-            if not sys.stdin.isatty():
-                print(
-                    "No users exist. Set AGENT_OBS_ADMIN_PASSWORD for non-interactive init.",
-                    file=sys.stderr,
-                )
-                return 1
-            password = getpass.getpass(f"Password for initial administrator {username!r}: ")
-        try:
-            user = await users.create_user(
-                db,
-                username=username,
-                password=password,
-                roles=["admin", "operator"],
-                actor_type=audit.ACTOR_BOOTSTRAP,
-            )
-        except ValueError as exc:
-            print(f"could not create administrator: {exc}", file=sys.stderr)
-            return 1
-        await db.commit()
-        print(f"created initial administrator {user.username!r}")
-        return 0
 
 
 def _wait_for_command(
@@ -484,76 +434,6 @@ async def _run_indexer(*, once: bool = False) -> int:
     return 0
 
 
-async def _run_user_passwd(args: list[str]) -> int:
-    """Reset a user's password without knowing the current one.
-
-    Local-console escape hatch for a forgotten administrator password: looks
-    the user up, hashes the new password, revokes every active session and API
-    token, and writes an audit row. No strength policy is applied (non-empty
-    and matching prompts only); secrets never reach stdout or shell history.
-    """
-    import argparse
-    import getpass
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from agent_observatory.db.session import get_engine
-    from agent_observatory.services import audit, auth, users
-
-    parser = argparse.ArgumentParser(
-        prog="agent-observatory user-passwd",
-        description="Reset a user's password (current password not required).",
-    )
-    parser.add_argument("username", nargs="?", default="admin", help="Defaults to admin.")
-    parser.add_argument(
-        "--password",
-        help="New password. Omit to be prompted twice (keeps it out of history).",
-    )
-    ns = parser.parse_args(args)
-
-    password = ns.password
-    if not password:
-        if not sys.stdin.isatty():
-            print(
-                "agent-observatory: no TTY for a password prompt; pass --password",
-                file=sys.stderr,
-            )
-            return 1
-        first = getpass.getpass(f"New password for {ns.username!r}: ")
-        second = getpass.getpass("Repeat new password: ")
-        if first != second:
-            print("agent-observatory: passwords do not match", file=sys.stderr)
-            return 1
-        if not first:
-            print("agent-observatory: password must not be empty", file=sys.stderr)
-            return 1
-        password = first
-
-    factory = async_sessionmaker(get_engine(), expire_on_commit=False)
-    async with factory() as db:
-        user = await users.by_username(db, ns.username)
-        if user is None:
-            print(f"agent-observatory: user {ns.username!r} not found", file=sys.stderr)
-            return 1
-        user.password_hash = auth.hash_password(password)
-        revoked_sessions, revoked_tokens = await users.revoke_all_credentials(db, user.id)
-        await audit.record(
-            db,
-            action="user.password_reset",
-            actor_type=audit.ACTOR_BOOTSTRAP,
-            resource_type="user",
-            resource_id=user.id,
-            detail={"username": user.username, "credentials_revoked": True},
-        )
-        await db.commit()
-        username = user.username
-    print(
-        f"password updated for {username!r}; revoked {revoked_sessions} session(s) "
-        f"and {revoked_tokens} API token(s)"
-    )
-    return 0
-
-
 async def _run_worker() -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -566,64 +446,4 @@ async def _run_worker() -> int:
         await indexer.run()
     finally:
         await indexer.stop()
-    return 0
-
-
-async def _run_user_add(args: list[str]) -> int:
-    """Provision a user with a hashed password and one or more roles.
-
-    Password source precedence: `--password`, then `AGENT_OBS_USER_PASSWORD`,
-    then an interactive prompt (keeps secrets out of shell history). Reuses
-    `services.users.create_user`, which seeds roles and writes an audit row.
-    """
-    import argparse
-    import getpass
-    import os
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from agent_observatory.db.session import get_engine
-    from agent_observatory.services import audit, users
-
-    parser = argparse.ArgumentParser(
-        prog="agent-observatory user-add",
-        description="Provision a user (idempotent role seed + hashed password).",
-    )
-    parser.add_argument("username")
-    parser.add_argument(
-        "--role",
-        dest="roles",
-        action="append",
-        choices=sorted(users.KNOWN_ROLES),
-        help="Grant a role (repeatable). Defaults to viewer.",
-    )
-    parser.add_argument(
-        "--password",
-        help="Password (>=10 chars). Omit to read AGENT_OBS_USER_PASSWORD or prompt.",
-    )
-    ns = parser.parse_args(args)
-
-    roles = ns.roles or ["viewer"]
-    password = ns.password or os.environ.get("AGENT_OBS_USER_PASSWORD")
-    if not password:
-        password = getpass.getpass("Password: ")
-
-    factory = async_sessionmaker(get_engine(), expire_on_commit=False)
-    async with factory() as db:
-        try:
-            user = await users.create_user(
-                db,
-                username=ns.username,
-                password=password,
-                roles=roles,
-                actor_type=audit.ACTOR_BOOTSTRAP,
-            )
-        except ValueError as exc:
-            await db.rollback()
-            print(f"agent-observatory: {exc}", file=sys.stderr)
-            return 2
-        await db.commit()
-        role_names = sorted(user.role_names)
-        user_id = user.id
-    print(f"created user {ns.username!r} with roles {role_names} (id={user_id})")
     return 0

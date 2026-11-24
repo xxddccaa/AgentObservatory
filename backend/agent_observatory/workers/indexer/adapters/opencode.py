@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import (
@@ -18,21 +17,17 @@ from agent_observatory.db.models import (
     ToolCall,
 )
 
-from .adapters import PlanAction, SourceDescriptor, SourcePlan
-from .tree_cache import cached_resolve, rglob_cached
-
-
-def _id(prefix: str, value: str) -> str:
-    return hashlib.sha256(f"{prefix}:{value}".encode()).hexdigest()[:48]
-
-
-def _ts(value: object) -> datetime | None:
-    try:
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value / 1000 if value > 1e11 else value, tz=UTC)
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
+from ..tree_cache import cached_resolve, rglob_cached
+from .base import SourceDescriptor, SourcePlan
+from .common import (
+    as_int,
+    clear_session_rows,
+    duration_ms,
+    parse_ts,
+    pg_safe,
+    plan_stat_rebuild,
+    stable_id,
+)
 
 
 def _text(value: object) -> str:
@@ -47,23 +42,6 @@ def _text(value: object) -> str:
             if key in value:
                 return _text(value[key])
     return str(value)
-
-
-def _int(value: object) -> int:
-    try:
-        return int(value) if value is not None else 0
-    except (TypeError, ValueError):
-        return 0
-
-
-def _pg_safe(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.replace("\x00", "\\u0000")
-    if isinstance(value, dict):
-        return {str(_pg_safe(key)): _pg_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_pg_safe(item) for item in value]
-    return value
 
 
 class OpenCodeJsonSource:
@@ -102,18 +80,7 @@ class OpenCodeJsonSource:
         ]
 
     def plan(self, source: SourceDescriptor, checkpoint: Any | None = None) -> SourcePlan:
-        st = source.path.stat()
-        fp = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "path": str(source.path.resolve())}
-        if checkpoint is None or getattr(checkpoint, "parser_version", None) != self.parser_version:
-            return SourcePlan(source, PlanAction.REBUILD, fp)
-        prev = getattr(checkpoint, "fingerprint_json", {}) or {}
-        if (
-            getattr(checkpoint, "status", None) == "indexed"
-            and prev.get("size") == st.st_size
-            and prev.get("mtime_ns") == st.st_mtime_ns
-        ):
-            return SourcePlan(source, PlanAction.UNCHANGED, fp)
-        return SourcePlan(source, PlanAction.REBUILD, fp)
+        return plan_stat_rebuild(source, checkpoint, self.parser_version)
 
     async def ingest(self, db: AsyncSession, plan: SourcePlan) -> AgentSession:
         src = plan.source
@@ -123,8 +90,8 @@ class OpenCodeJsonSource:
             root = {}
         if not isinstance(root, dict):
             root = {"value": root}
-        root = _pg_safe(root)
-        sid = _id("session", src.identity)
+        root = pg_safe(root)
+        sid = stable_id("session", src.identity)
         session = await db.scalar(
             select(AgentSession).where(AgentSession.source_identity == src.identity)
         )
@@ -145,8 +112,7 @@ class OpenCodeJsonSource:
             db.add(session)
             await db.flush()
         else:
-            for m in (CodexMessage, ToolCall, AgentTurn, AgentEvent):
-                await db.execute(delete(m).where(m.agent_session_id == session.id))
+            await clear_session_rows(db, session.id)
         session.cwd = root.get("cwd") or root.get("workingDirectory")
         session.model = root.get("model") or root.get("modelName")
         session.display_title = root.get("title") or root.get("name") or session.thread_id
@@ -174,9 +140,9 @@ class OpenCodeJsonSource:
         for _path, obj in records:
             if not isinstance(obj, dict):
                 obj = {"value": obj}
-            obj = _pg_safe(obj)
+            obj = pg_safe(obj)
             typ = str(obj.get("type") or obj.get("role") or "record")
-            ts = _ts(obj.get("timestamp") or obj.get("time"))
+            ts = parse_ts(obj.get("timestamp") or obj.get("time"))
             ev = AgentEvent(
                 agent_session_id=session.id,
                 event_index=seq,
@@ -200,7 +166,7 @@ class OpenCodeJsonSource:
             if role == "user":
                 turn_index += 1
                 current_turn = AgentTurn(
-                    id=_id("turn", f"{session.id}:{turn_index}"),
+                    id=stable_id("turn", f"{session.id}:{turn_index}"),
                     agent=self.agent,
                     agent_session_id=session.id,
                     turn_index=turn_index,
@@ -222,7 +188,7 @@ class OpenCodeJsonSource:
                     )
                 db.add(
                     CodexMessage(
-                        id=_id("msg", f"{session.id}:{seq}"),
+                        id=stable_id("msg", f"{session.id}:{seq}"),
                         agent_session_id=session.id,
                         event_id=ev.id,
                         role=str(role),
@@ -239,9 +205,9 @@ class OpenCodeJsonSource:
                 )
             usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
             usage = usage or (obj.get("tokens") if isinstance(obj.get("tokens"), dict) else {})
-            in_tokens = _int(usage.get("input") or usage.get("input_tokens"))
-            out_tokens = _int(usage.get("output") or usage.get("output_tokens"))
-            total_tokens += _int(usage.get("total") or usage.get("total_tokens")) or in_tokens + out_tokens
+            in_tokens = as_int(usage.get("input") or usage.get("input_tokens"))
+            out_tokens = as_int(usage.get("output") or usage.get("output_tokens"))
+            total_tokens += as_int(usage.get("total") or usage.get("total_tokens")) or in_tokens + out_tokens
             if current_turn is not None and role == "assistant":
                 current_turn.input_tokens += in_tokens
                 current_turn.output_tokens += out_tokens
@@ -258,7 +224,7 @@ class OpenCodeJsonSource:
                 state = part.get("state") if isinstance(part.get("state"), dict) else {}
                 cid = str(part.get("id") or part.get("callID") or part.get("call_id") or obj.get("id") or seq)
                 tool_call = ToolCall(
-                        id=_id("tool", f"{session.id}:{cid}"),
+                        id=stable_id("tool", f"{session.id}:{cid}"),
                         agent=self.agent,
                         agent_session_id=session.id,
                         event_id=ev.id,
@@ -287,7 +253,7 @@ class OpenCodeJsonSource:
             if turn.started_at is not None:
                 db.add(
                     ActivitySpan(
-                        id=_id("span", f"turn:{turn.id}"),
+                        id=stable_id("span", f"turn:{turn.id}"),
                         agent=self.agent,
                         source_kind=self.kind,
                         source_record_id=f"turn:{turn.turn_index}",
@@ -299,11 +265,7 @@ class OpenCodeJsonSource:
                         status=turn.status,
                         started_at=turn.started_at,
                         completed_at=turn.completed_at,
-                        duration_ms=(
-                            _int((turn.completed_at - turn.started_at).total_seconds() * 1000)
-                            if turn.completed_at
-                            else None
-                        ),
+                        duration_ms=duration_ms(turn.started_at, turn.completed_at),
                         confidence="derived",
                         metadata_json={},
                     )
@@ -312,7 +274,7 @@ class OpenCodeJsonSource:
             if tool.started_at is not None:
                 db.add(
                     ActivitySpan(
-                        id=_id("span", f"tool:{tool.id}"),
+                        id=stable_id("span", f"tool:{tool.id}"),
                         agent=self.agent,
                         source_kind=self.kind,
                         source_record_id=f"tool:{tool.call_id}",
@@ -324,11 +286,7 @@ class OpenCodeJsonSource:
                         status=tool.status,
                         started_at=tool.started_at,
                         completed_at=tool.completed_at,
-                        duration_ms=(
-                            _int((tool.completed_at - tool.started_at).total_seconds() * 1000)
-                            if tool.completed_at
-                            else None
-                        ),
+                        duration_ms=duration_ms(tool.started_at, tool.completed_at),
                         confidence="derived",
                         metadata_json={},
                     )

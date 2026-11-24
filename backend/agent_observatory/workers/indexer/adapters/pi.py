@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_observatory.db.models import (
@@ -19,10 +19,17 @@ from agent_observatory.db.models import (
     ToolCall,
 )
 
-from .adapters import PlanAction, SourceDescriptor, SourcePlan
-from .fingerprints import file_fingerprint, indexed_content_matches
+from ..fingerprints import file_fingerprint
+from ..tree_cache import cached_resolve, rglob_cached
+from .base import PlanAction, SourceDescriptor, SourcePlan
+from .common import (
+    as_int,
+    clear_session_rows,
+    duration_ms,
+    plan_append_jsonl,
+    stable_id,
+)
 from .pi_parser import PiRecord, content_blocks, iter_records
-from .tree_cache import cached_resolve, rglob_cached
 
 _ONGOING_MTIME_SECONDS = 60
 _TOOL_KINDS = {
@@ -41,10 +48,6 @@ _TOOL_KINDS = {
 _MUTATING_TOOLS = {"write", "edit", "apply_patch"}
 
 
-def _id(prefix: str, value: str) -> str:
-    return hashlib.sha256(f"{prefix}:{value}".encode()).hexdigest()[:48]
-
-
 def _text(value: Any) -> str:
     if isinstance(value, str):
         return value.replace("\x00", "\\u0000")
@@ -61,10 +64,7 @@ def _text(value: Any) -> str:
 
 
 def _as_int(value: Any) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
+    return as_int(value, non_negative=False)
 
 
 def _usage(message: dict[str, Any]) -> dict[str, int]:
@@ -180,32 +180,15 @@ class PiJsonlSource:
         ]
 
     def plan(self, source: SourceDescriptor, checkpoint: Any | None) -> SourcePlan:
-        stat = source.path.stat()
-        fingerprint = {
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "path": str(source.path.resolve()),
-        }
-        if checkpoint is None or checkpoint.parser_version != self.parser_version:
-            return SourcePlan(source, PlanAction.REBUILD, file_fingerprint(source.path))
-        previous = checkpoint.fingerprint_json or {}
-        cursor = checkpoint.cursor_json or {}
-        if stat.st_size < _as_int(cursor.get("byte_offset")):
-            return SourcePlan(source, PlanAction.REBUILD, fingerprint)
-        if (
-            checkpoint.status == "indexed"
-            and stat.st_size == previous.get("size")
-            and stat.st_mtime_ns == previous.get("mtime_ns")
-        ):
-            return SourcePlan(source, PlanAction.UNCHANGED, fingerprint)
-        fingerprint = file_fingerprint(source.path)
-        action = (
-            PlanAction.REBUILD
-            if stat.st_size == previous.get("size")
-            or not indexed_content_matches(source.path, previous)
-            else PlanAction.APPEND
+        return plan_append_jsonl(
+            source,
+            checkpoint,
+            self.parser_version,
+            check_path=False,
+            check_prefix=True,
+            rebuild_on_same_size=True,
+            cached_path=False,
         )
-        return SourcePlan(source, action, fingerprint)
 
     async def ingest(self, db: AsyncSession, plan: SourcePlan) -> AgentSession:
         source = plan.source
@@ -217,7 +200,7 @@ class PiJsonlSource:
         )
         if session is None:
             session = AgentSession(
-                id=_id("session", source.identity),
+                id=stable_id("session", source.identity),
                 thread_id=source.path.stem,
                 rollout_path=str(source.path),
                 rollout_real_path=real_path,
@@ -359,12 +342,7 @@ class PiJsonlSource:
             session.end_time = record.event_timestamp or session.end_time
 
     async def _clear(self, db: AsyncSession, session_id: str) -> None:
-        for model in (ActivitySpan, CodexMessage, ToolCall, AgentTurn, AgentEvent):
-            await db.execute(
-                delete(model)
-                .where(model.agent_session_id == session_id)
-                .execution_options(synchronize_session=False)
-            )
+        await clear_session_rows(db, session_id, synchronize_session=False)
 
     async def _project(self, db: AsyncSession, session: AgentSession) -> None:
         maximum = await db.scalar(
@@ -376,12 +354,9 @@ class PiJsonlSource:
             return
         if maximum == session.projected_event_index:
             return
-        for model in (ActivitySpan, CodexMessage, ToolCall, AgentTurn):
-            await db.execute(
-                delete(model)
-                .where(model.agent_session_id == session.id)
-                .execution_options(synchronize_session="evaluate")
-            )
+        await clear_session_rows(
+            db, session.id, include_events=False, synchronize_session="evaluate"
+        )
         nodes = await db.stream(
             select(
                 AgentEvent.line_number,
@@ -428,7 +403,7 @@ class PiJsonlSource:
                 return
             db.add(
                 CodexMessage(
-                    id=_id("msg", f"{session.id}:{event.event_index}:{sequence}"),
+                    id=stable_id("msg", f"{session.id}:{event.event_index}:{sequence}"),
                     agent_session_id=session.id,
                     event_id=event.id,
                     turn_id=current_turn.id if current_turn else None,
@@ -453,11 +428,9 @@ class PiJsonlSource:
                 current_turn.completed_at = timestamp
             current_turn.status = status
             current_turn.outcome = status
-            if current_turn.started_at and current_turn.completed_at:
-                current_turn.duration_ms = int(
-                    (current_turn.completed_at - current_turn.started_at).total_seconds()
-                    * 1000
-                )
+            current_turn.duration_ms = duration_ms(
+                current_turn.started_at, current_turn.completed_at
+            )
             current_turn = None
 
         events = await db.stream_scalars(
@@ -506,7 +479,7 @@ class PiJsonlSource:
                 if current_turn is not None:
                     finish_turn(ts)
                 current_turn = AgentTurn(
-                    id=_id("turn", f"{session.id}:{len(turns)}"),
+                    id=stable_id("turn", f"{session.id}:{len(turns)}"),
                     agent=self.agent,
                     agent_session_id=session.id,
                     turn_index=len(turns),
@@ -550,7 +523,7 @@ class PiJsonlSource:
             if role == "assistant":
                 if current_turn is None:
                     current_turn = AgentTurn(
-                        id=_id("turn", f"{session.id}:{len(turns)}"),
+                        id=stable_id("turn", f"{session.id}:{len(turns)}"),
                         agent=self.agent,
                         agent_session_id=session.id,
                         turn_index=len(turns),
@@ -616,7 +589,7 @@ class PiJsonlSource:
                                 arguments, ensure_ascii=False, default=str
                             )
                         tool = ToolCall(
-                            id=_id("tool", f"{session.id}:{call_id}"),
+                            id=stable_id("tool", f"{session.id}:{call_id}"),
                             agent=self.agent,
                             agent_session_id=session.id,
                             turn_id=current_turn.id if current_turn else None,
@@ -689,7 +662,7 @@ class PiJsonlSource:
             if turn.started_at is not None:
                 db.add(
                     ActivitySpan(
-                        id=_id("span", f"turn:{turn.id}"),
+                        id=stable_id("span", f"turn:{turn.id}"),
                         agent=self.agent,
                         source_kind=self.kind,
                         source_record_id=f"turn:{turn.turn_index}",
@@ -722,7 +695,7 @@ class PiJsonlSource:
                 continue
             db.add(
                 ActivitySpan(
-                    id=_id("span", f"tool:{tool.id}"),
+                    id=stable_id("span", f"tool:{tool.id}"),
                     agent=self.agent,
                     source_kind=self.kind,
                     source_record_id=f"tool:{tool.call_id}",

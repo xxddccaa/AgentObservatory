@@ -195,9 +195,7 @@ import {
 } from "../api/history";
 import AgentBadge from "../components/AgentBadge.vue";
 import { AGENT_OPTIONS, type AgentFilter } from "../constants/agents";
-import { useAuthStore } from "../stores/auth";
 
-const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 const sessions = ref<HistorySession[]>([]);
@@ -225,9 +223,9 @@ const stepgoUnlinkedCount = computed(
   () => stepgoRuns.value.filter((run) => run.link_status !== "linked").length
 );
 
+// One local user, so one remembered set of expanded workspace groups.
 function expandedGroupsStorageKey(): string {
-  const identity = auth.principal?.id || auth.username || "anonymous";
-  return `agent-observatory.history.expanded-workspaces.v1:${identity}`;
+  return "agent-observatory.history.expanded-workspaces.v2";
 }
 
 function readExpandedGroups(): Set<string> {

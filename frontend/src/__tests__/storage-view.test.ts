@@ -1,5 +1,4 @@
 import { createApp, nextTick } from "vue";
-import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const retentionApi = vi.hoisted(() => ({
@@ -16,7 +15,6 @@ vi.mock("../api/retention", async (importOriginal) => {
   return { ...actual, ...retentionApi };
 });
 
-import { useAuthStore } from "../stores/auth";
 import Storage from "../views/Storage.vue";
 
 const overview = {
@@ -119,15 +117,10 @@ async function flush() {
   await nextTick();
 }
 
-async function mountView(roles: string[] = ["admin"]) {
+async function mountView() {
   const root = document.createElement("div");
   document.body.appendChild(root);
-  const pinia = createPinia();
-  setActivePinia(pinia);
-  const auth = useAuthStore();
-  auth.$patch({ status: "authed", principal: { id: "admin", username: "admin", roles } });
   const app = createApp(Storage);
-  app.use(pinia);
   app.mount(root);
   await flush();
   return { app, root };
@@ -200,7 +193,7 @@ describe("Storage view", () => {
     mounted.app.unmount();
   });
 
-  it("queues an audited run for admins and reports the command id", async () => {
+  it("queues an audited run and reports the command id", async () => {
     const mounted = await mountView();
     button(mounted.root, "预览清理")?.click();
     await flush();
@@ -292,13 +285,13 @@ describe("Storage view", () => {
     mounted.app.unmount();
   });
 
-  it("never offers deletion to operators", async () => {
-    const mounted = await mountView(["operator"]);
+  it("offers deletion without any login or role", async () => {
+    const mounted = await mountView();
     button(mounted.root, "预览清理")?.click();
     await flush();
     expect(retentionApi.previewRetention).toHaveBeenCalled();
-    expect(button(mounted.root, "立即清理")).toBeUndefined();
-    expect(mounted.root.textContent).toContain("只有 admin 可以发起清理");
+    expect(button(mounted.root, "立即清理")).toBeDefined();
+    expect(mounted.root.textContent).not.toContain("只有 admin");
     mounted.app.unmount();
   });
 });

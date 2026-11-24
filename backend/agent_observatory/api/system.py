@@ -1,4 +1,4 @@
-"""Administrator-only local runtime status and redacted log access."""
+"""Local runtime status and redacted log access."""
 from __future__ import annotations
 
 import base64
@@ -10,7 +10,6 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from agent_observatory.api.deps import AdminPrincipal
 from agent_observatory.api.health import readiness_payload
 from agent_observatory.config import settings
 from agent_observatory.services.redaction import redact_secrets
@@ -41,7 +40,7 @@ def _timestamp(value: object) -> str | None:
 
 
 @router.get("/status")
-async def system_status(principal: AdminPrincipal) -> dict[str, Any]:
+async def system_status() -> dict[str, Any]:
     readiness = await readiness_payload()
     supervisor = Supervisor(settings().home).status()
     component_states = dict(readiness["components"])
@@ -164,7 +163,6 @@ def _read_recent(
 
 @router.get("/logs")
 async def system_logs(
-    principal: AdminPrincipal,
     component: str = Query(default="all"),
     cursor: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),

@@ -7,7 +7,12 @@ import time
 import pytest
 
 from agent_observatory.cli import main
-from agent_observatory.supervisor import ProcessSpec, Supervisor, pid_matches
+from agent_observatory.supervisor import (
+    ProcessSpec,
+    Supervisor,
+    _proc_start_token,
+    pid_matches,
+)
 
 
 def _sleep_spec(name: str = "api", seconds: float = 10) -> dict[str, ProcessSpec]:
@@ -35,13 +40,10 @@ def test_help_lists_lifecycle_commands(capsys):
 
 def test_pid_identity_rejects_reused_token():
     pid = os.getpid()
-    assert pid_matches(pid, str(_current_start_token() + 1)) is False
-
-
-def _current_start_token() -> int:
-    with open(f"/proc/{os.getpid()}/stat") as handle:
-        fields = handle.read().split()
-    return int(fields[21])
+    token = _proc_start_token(pid)
+    assert token is not None and " " not in token
+    assert pid_matches(pid, token) is True
+    assert pid_matches(pid, token + "-reused") is False
 
 
 def test_supervisor_start_status_stop_and_logs(tmp_path):

@@ -1,6 +1,6 @@
 // Shared frontend API client. Every typed helper goes through `request()`, so
-// cookie handling, JSON parsing, request IDs, and error envelopes stay
-// consistent across the application.
+// JSON parsing, request IDs, and error envelopes stay consistent across the
+// application. There is no login, so no credentials are attached.
 
 export interface ErrorEnvelope {
   error: {
@@ -30,25 +30,7 @@ export class ApiError extends Error {
   }
 }
 
-export interface RequestOptions {
-  /** Skip the global 401 handler (used by login + /me bootstrap). */
-  suppressAuthHandler?: boolean;
-}
-
-type UnauthorizedHandler = () => void;
-const unauthorizedHandlers = new Set<UnauthorizedHandler>();
-
-/** Register a global handler invoked whenever a request returns 401. */
-export function onUnauthorized(handler: UnauthorizedHandler): () => void {
-  unauthorizedHandlers.add(handler);
-  return () => unauthorizedHandlers.delete(handler);
-}
-
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-  opts: RequestOptions = {}
-): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body !== undefined && !headers.has("Content-Type")) {
@@ -57,16 +39,12 @@ async function request<T>(
 
   let response: Response;
   try {
-    response = await fetch(path, { credentials: "include", ...init, headers });
+    response = await fetch(path, { credentials: "same-origin", ...init, headers });
   } catch (cause) {
     throw new ApiError(0, "Cannot reach the Observatory API.", cause, {
       code: "api_unreachable",
       retryable: true,
     });
-  }
-
-  if (response.status === 401 && !opts.suppressAuthHandler) {
-    unauthorizedHandlers.forEach((handler) => handler());
   }
 
   if (!response.ok) {
@@ -130,26 +108,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-export function get<T>(path: string, opts?: RequestOptions): Promise<T> {
-  return request<T>(path, {}, opts);
+export function get<T>(path: string): Promise<T> {
+  return request<T>(path);
 }
 
-export function post<T>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
-  return request<T>(
-    path,
-    { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) },
-    opts
-  );
+export function post<T>(path: string, body?: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "POST",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
 }
 
-export function patch<T>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
-  return request<T>(
-    path,
-    { method: "PATCH", body: body === undefined ? undefined : JSON.stringify(body) },
-    opts
-  );
+export function patch<T>(path: string, body?: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "PATCH",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
 }
 
-export function del<T>(path: string, opts?: RequestOptions): Promise<T> {
-  return request<T>(path, { method: "DELETE" }, opts);
+export function del<T>(path: string): Promise<T> {
+  return request<T>(path, { method: "DELETE" });
 }

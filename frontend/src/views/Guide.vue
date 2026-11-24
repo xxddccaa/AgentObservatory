@@ -22,7 +22,7 @@
             <span class="section-number">01</span>
             <div>
               <h2>快速开始</h2>
-              <p>启动服务后，在浏览器打开默认入口并登录。</p>
+              <p>启动服务后，在浏览器打开默认入口即可使用，无需登录。</p>
             </div>
           </div>
           <div class="info-grid">
@@ -153,7 +153,7 @@
               <ul class="plain-list">
                 <li>单条记忆可复制原文或带来源的 Markdown。</li>
                 <li>多选后导出 Markdown 或 ZIP，并附带 <code>manifest.json</code>。</li>
-                <li>敏感内容默认脱敏；完整复制需要 operator 或 admin。</li>
+                <li>敏感内容默认脱敏；点击 Reveal / Copy raw 才取完整原文，并写入审计日志。</li>
               </ul>
             </div>
           </div>
@@ -186,7 +186,7 @@
               <div class="feature-icon" aria-hidden="true">⌫</div>
               <div>
                 <h3>执行与审计</h3>
-                <p>只有 admin 能提交删除。请求先写入 system_commands，由本机 Supervisor 执行，并把释放空间写入 retention_runs 与 audit_logs。</p>
+                <p>确认后提交删除。请求先写入 system_commands，由本机 Supervisor 执行，并把释放空间写入 retention_runs 与 audit_logs。</p>
               </div>
             </article>
             <article class="feature-item">
@@ -327,8 +327,8 @@ const navigationItems = [
   { icon: "▣", title: "Projects", description: "按工作目录聚合 session、turn、token 和活动时间。" },
   { icon: "⌁", title: "Insights", description: "查看 Token、延迟、工具失败率和质量信号。" },
   { icon: "⛁", title: "Storage", description: "预览并清理超过保留窗口的本地会话数据，操作写入审计日志。" },
-  { icon: "✓", title: "Audit", description: "审阅用户登录、系统控制和权限相关审计事件。" },
-  { icon: "⚙", title: "System", description: "管理员检查 API、PostgreSQL、Indexer 和 Supervisor。" },
+  { icon: "✓", title: "Audit", description: "审阅系统控制、清理和敏感内容访问等审计事件。" },
+  { icon: "⚙", title: "System", description: "检查 API、PostgreSQL、Indexer 和 Supervisor。" },
 ];
 
 const historySteps = [
@@ -350,8 +350,8 @@ const insightItems = [
 const commands = [
   {
     title: "初始化",
-    description: "检查依赖、配置数据库并创建管理员。",
-    command: "cd backend\nuv sync\nAGENT_OBS_ADMIN_PASSWORD='change-this-password' \\\n  uv run agent-observatory init",
+    description: "检查依赖、生成本机配置并初始化数据库。",
+    command: "cd backend\nuv sync\nuv run agent-observatory init",
   },
   {
     title: "后台启动",
@@ -387,9 +387,9 @@ const endpoints = [
 ];
 
 const securityItems = [
-  { title: "角色权限", description: "viewer 负责查看，operator 可执行受控运维操作，admin 负责用户、权限和系统管理。" },
+  { title: "访问控制", description: "单人本机使用，没有登录。默认只监听 127.0.0.1，并只接受 127.0.0.1 / localhost 的 Host 和同源写请求；改成 0.0.0.0 后同一网络内的人都能读取全部会话。" },
   { title: "事实来源", description: "PostgreSQL 保存会话、审计、命令和索引断点，是唯一持久化事实来源。" },
-  { title: "原始文件", description: "索引过程只读 ~/.codex、~/.claude、~/.stepcode、~/.dsh 等源目录；只有 admin 在 Storage 明确提交清理计划时才会删除旧文件。" },
+  { title: "原始文件", description: "索引过程只读 ~/.codex、~/.claude、~/.stepcode、~/.dsh、~/.gemini 等源目录；只有在 Storage 明确提交清理计划时才会删除旧文件（本机默认关闭）。" },
   { title: "敏感信息", description: "展示和导出会进行 secret redaction；不要提交 token、密码、dump、日志或截图。" },
 ];
 

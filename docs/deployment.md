@@ -15,7 +15,6 @@ API 与 Indexer Worker 两个子进程，不依赖 systemd / docker / Redis。
 | 本机路径 | 用途 |
 | --- | --- |
 | `config.env` | 本机配置、随机数据库口令及签名密钥，权限 600 |
-| `credentials.env` | 本机管理员凭据，权限 600；账户 `admin`，密码不写进仓库 |
 | `releases/<版本>/`、`current` | 源码快照、Python venv、Node 依赖和前端 dist；current 原子切换 |
 | `postgresql/data/`、`postgresql/run/`、`postgresql/logs/` | 独立 PostgreSQL 16，默认 127.0.0.1:55433 |
 | `backups/` | 部署前的 PostgreSQL custom-format 备份；不自动删除旧备份 |
@@ -37,9 +36,11 @@ API 与 Indexer Worker 两个子进程，不依赖 systemd / docker / Redis。
 ./manage.sh logs api --lines 100
 ```
 
-首次创建管理员时，密码通过本机 `credentials.env`、`AGENT_OBS_ADMIN_PASSWORD` 或
-交互输入提供；不把真实值放在 shell 命令示例里。已存在的账号不会在每次部署时重置。
-需要重置时用 `./manage.sh passwd admin`，该操作会撤销已有会话 / API token，并写审计日志。
+没有登录（账号、密码、角色、API token 已在迁移 `0016_drop_accounts` 中删除），部署不需要
+管理员密码。默认只监听 `127.0.0.1`：只接受 `127.0.0.1` / `localhost` / `::1` 的 Host，
+写请求必须同源。需要局域网访问时首次部署用 `AGENT_OBS_HOST=0.0.0.0 ./manage.sh deploy`，
+或修改本机 `config.env` 的 `AGENT_OBS_HOST` 后 `./manage.sh restart`；此时能访问端口的人都能
+读取全部会话。经反向代理 / 自定义域名访问 loopback 实例时，在 `AGENT_OBS_ALLOWED_HOSTS` 追加域名。
 本机默认关闭 Storage 删除；所有原始 agent 数据目录仅被读取。
 
 已有旧实例（例如 5432 上的旧 `agent_observatory`）时，不要直接切到空数据库：
@@ -54,7 +55,30 @@ API 与 Indexer Worker 两个子进程，不依赖 systemd / docker / Redis。
 验证只在本机快照内执行，`TEST_DATABASE_URL` / `E2E_DATABASE_URL` 必须指向独立的
 `agent_observatory_ci`，不能是运行库。E2E 脚本在任何 downgrade / upgrade 前先验证库名。
 共享仓库不要运行 `uv sync` / `npm ci`，也不要在里面创建 `.env`、运行时或测试报告。
-API 只绑定 loopback；跨机器访问通过 SSH 隧道或单独配置的安全反向代理，保留鉴权。
+API 默认只绑定 loopback；跨机器访问优先用 SSH 隧道（`ssh -L 8125:127.0.0.1:8125 host`）。
+
+### macOS 工作站（user 档案）
+
+在 macOS 上以普通用户运行 `./manage.sh deploy` 时，`scripts/deploy.py` 自动使用 user 档案，
+流程和 Linux 相同，仅以下几点不同：
+
+| 项目 | Linux（root 档案） | macOS（user 档案） |
+| --- | --- | --- |
+| 部署根 | `/root/.agent-observatory/` | `~/.agent-observatory/`（必须是 home 下的专用子目录） |
+| PostgreSQL | `/usr/lib/postgresql/16/bin`，`postgres` 用户运行 | Homebrew `postgresql@16`（或 17 / 18），当前用户运行 |
+| 额外依赖 | `runuser`、`setfacl` | 无 |
+| Node | 22 | 22 或更新 |
+| Python | uv 选择的 3.12 | 构建时设置 `UV_PYTHON=3.12` |
+
+- 已初始化的集群按 `postgresql/data/PG_VERSION` 选择同一大版本的 Homebrew 二进制，
+  之后再装其他大版本也不会误用；可用 `AGENT_OBS_PG_BIN`（环境或 `config.env`）显式指定。
+- 集群仍只监听 `127.0.0.1:55433`，本地 socket 在 `postgresql/run/`，peer 认证到当前用户；
+  不会碰 Homebrew 默认的 5432 实例。
+- Supervisor 在没有 `/proc` 的系统上用 `ps -o stat= -o lstart=` 校验进程身份。
+- SQLAlchemy 在 macOS arm64 上不会自动安装 greenlet，所以依赖写成 `SQLAlchemy[asyncio]`。
+- Node 25 起自带实验性 `localStorage`，会盖住 jsdom 的实现；用 Node 25+ 跑前端单测时加
+  `NODE_OPTIONS=--no-experimental-webstorage`，Node 22 不需要。
+- 机器重启后执行 `./manage.sh up`（会先启动本机 PostgreSQL）。
 
 ### 低资源默认值
 
@@ -157,21 +181,12 @@ PATH=/opt/node22/bin:$PATH npm run build   # 产物 frontend/dist，由 API 同�
 
 ```bash
 cd backend
-AGENT_OBS_ADMIN_PASSWORD='change-this-password' \
-  .venv/bin/agent-observatory init      # 校验依赖、建 .env、应用迁移、构建前端
+.venv/bin/agent-observatory init      # 校验依赖、建 .env、应用迁移、构建前端
 ```
 
 `init` 会：生成 `backend/.env`（若不存在，密钥随机化，权限 600）→ 执行
 `alembic upgrade head` → 前端 `dist` 缺失或过期时执行 `npm ci` / `npm run build`。
 
-创建管理员（幂等，会写审计行）：
-
-```bash
-.venv/bin/agent-observatory user-add <username> --role admin --password '<password>'
-```
-
-密码最短 10 位；省略 `--password` 时读 `AGENT_OBS_USER_PASSWORD` 或交互输入，
-避免进 shell history。角色：`admin` / `operator` / `viewer`，可重复 `--role` 叠加。
 
 ## 4. 启动与常用命令
 
@@ -314,5 +329,5 @@ location / {
 }
 ```
 
-应用自带 session cookie 与 API token 鉴权（admin/operator/viewer），
-对外暴露时务必使用 HTTPS 并轮换 `.env` 中的两个 secret。
+应用没有登录，反向代理本身必须负责鉴权（例如 HTTP Basic / SSO），并在
+`AGENT_OBS_ALLOWED_HOSTS` 中加入对外域名；不要把无鉴权的实例直接暴露到公网。
