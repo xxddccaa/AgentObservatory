@@ -1,5 +1,9 @@
 # Agent Observatory
 
+> [!WARNING]
+> 本仓库已废弃，不再维护。请使用新仓库：
+> [xxddccaa/agent-observatory-go](https://github.com/xxddccaa/agent-observatory-go)
+
 Agent Observatory 是一个本地优先、只读、可审计的多 agent 会话观测台。它统一索引本机
 coding agent 的历史会话，提供 Session Viewer、搜索/导出、Token 与工具指标、数据源
 健康度和审计日志，不负责终端控制或任务编排。单人本机使用，没有登录。
